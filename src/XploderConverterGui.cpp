@@ -16,11 +16,14 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "XploderCmpConverter.hpp"
 
@@ -33,13 +36,15 @@
 #endif
 
 #pragma comment(lib, "Comctl32.lib")
+#pragma comment(lib, "Shell32.lib")
 
 namespace
 {
     constexpr wchar_t WindowClassName[] = L"XploderPsxConverterGuiWindow";
+    constexpr wchar_t SplitterClassName[] = L"XploderPsxConverterSplitter";
     constexpr wchar_t AppTitle[] = L"Xploder PSX Converter";
-    constexpr wchar_t AppVersion[] = L"v1.00";
-    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.00";
+    constexpr wchar_t AppVersion[] = L"v1.01";
+    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.01";
 
     enum ControlId : int
     {
@@ -56,6 +61,7 @@ namespace
         IdCopyButton,
         IdClearButton,
         IdSwapButton,
+        IdSplitter,
         IdStatusLabel
     };
 
@@ -74,10 +80,22 @@ namespace
     HWND g_clearButton = nullptr;
     HWND g_swapButton = nullptr;
     HWND g_statusLabel = nullptr;
+    HWND g_splitter = nullptr;
     HWND g_inputLabel = nullptr;
     HWND g_outputLabel = nullptr;
     HFONT g_uiFont = nullptr;
     bool g_isConverting = false;
+    bool g_isLoadingInput = false;
+    bool g_isDraggingSplitter = false;
+    double g_splitRatio = 0.5;
+
+    constexpr int LayoutMargin = 10;
+    constexpr int SplitterWidth = 8;
+    constexpr int MinimumPaneWidth = 100;
+
+    void layoutControls(HWND hwnd);
+    void layoutPaneControls(HWND hwnd, bool repaintImmediately);
+    void convertNow();
 
     std::wstring widenUtf8(const std::string& text)
     {
@@ -167,6 +185,123 @@ namespace
     {
         setWindowText(hwnd, normalizeLineEndingsForEdit(text));
     }
+
+    bool readDroppedFileBytes(
+        const std::wstring& path,
+        std::vector<std::uint8_t>& bytes,
+        std::wstring& error)
+    {
+        constexpr LONGLONG MaximumDroppedFileSize = 64LL * 1024LL * 1024LL;
+
+        HANDLE file = CreateFileW(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr);
+
+        if (file == INVALID_HANDLE_VALUE)
+        {
+            error = L"Windows could not open the file.";
+            return false;
+        }
+
+        LARGE_INTEGER fileSize{};
+        if (!GetFileSizeEx(file, &fileSize))
+        {
+            CloseHandle(file);
+            error = L"Windows could not determine the file size.";
+            return false;
+        }
+
+        if (fileSize.QuadPart < 0 || fileSize.QuadPart > MaximumDroppedFileSize)
+        {
+            CloseHandle(file);
+            error = L"The file is larger than the 64 MB text-file limit.";
+            return false;
+        }
+
+        bytes.resize(static_cast<std::size_t>(fileSize.QuadPart));
+        std::size_t totalRead = 0;
+        while (totalRead < bytes.size())
+        {
+            const std::size_t remaining = bytes.size() - totalRead;
+            const DWORD request = static_cast<DWORD>(std::min<std::size_t>(remaining, 1024U * 1024U));
+            DWORD amountRead = 0;
+            if (!ReadFile(file, bytes.data() + totalRead, request, &amountRead, nullptr))
+            {
+                CloseHandle(file);
+                bytes.clear();
+                error = L"Windows could not read the file.";
+                return false;
+            }
+
+            if (amountRead == 0)
+                break;
+
+            totalRead += amountRead;
+        }
+
+        CloseHandle(file);
+        bytes.resize(totalRead);
+        return true;
+    }
+
+    std::wstring decodeDroppedText(const std::vector<std::uint8_t>& bytes)
+    {
+        if (bytes.empty())
+            return {};
+
+        // UTF-16 little-endian BOM.
+        if (bytes.size() >= 2U && bytes[0] == 0xFFU && bytes[1] == 0xFEU)
+        {
+            const std::size_t characterCount = (bytes.size() - 2U) / 2U;
+            std::wstring text(characterCount, L'\0');
+            for (std::size_t i = 0; i < characterCount; ++i)
+            {
+                const std::size_t offset = 2U + i * 2U;
+                text[i] = static_cast<wchar_t>(
+                    static_cast<unsigned int>(bytes[offset]) |
+                    (static_cast<unsigned int>(bytes[offset + 1U]) << 8U));
+            }
+            return text;
+        }
+
+        // UTF-16 big-endian BOM.
+        if (bytes.size() >= 2U && bytes[0] == 0xFEU && bytes[1] == 0xFFU)
+        {
+            const std::size_t characterCount = (bytes.size() - 2U) / 2U;
+            std::wstring text(characterCount, L'\0');
+            for (std::size_t i = 0; i < characterCount; ++i)
+            {
+                const std::size_t offset = 2U + i * 2U;
+                text[i] = static_cast<wchar_t>(
+                    (static_cast<unsigned int>(bytes[offset]) << 8U) |
+                    static_cast<unsigned int>(bytes[offset + 1U]));
+            }
+            return text;
+        }
+
+        std::size_t offset = 0;
+        if (bytes.size() >= 3U &&
+            bytes[0] == 0xEFU && bytes[1] == 0xBBU && bytes[2] == 0xBFU)
+        {
+            offset = 3U;
+        }
+
+        const std::string encoded(
+            reinterpret_cast<const char*>(bytes.data() + offset),
+            bytes.size() - offset);
+        return widenUtf8(encoded);
+    }
+
+    std::wstring fileNameFromPath(const std::wstring& path)
+    {
+        const std::size_t separator = path.find_last_of(L"\\/");
+        return separator == std::wstring::npos ? path : path.substr(separator + 1U);
+    }
     void setStatus(const std::wstring& status)
     {
         if (g_statusLabel != nullptr)
@@ -220,6 +355,83 @@ namespace
         return static_cast<int>(SendMessageW(hwnd, CB_GETCURSEL, 0, 0));
     }
 
+    bool loadDroppedTextFile(const std::wstring& path)
+    {
+        std::vector<std::uint8_t> bytes;
+        std::wstring error;
+        if (!readDroppedFileBytes(path, bytes, error))
+        {
+            setStatus(std::wstring(L"Could not load dropped file: ") + error);
+            MessageBeep(MB_ICONWARNING);
+            return false;
+        }
+
+        std::wstring text = decodeDroppedText(bytes);
+        while (!text.empty() && text.back() == L'\0')
+            text.pop_back();
+
+        if (text.find(L'\0') != std::wstring::npos)
+        {
+            setStatus(L"The dropped file contains binary data and was not loaded.");
+            MessageBeep(MB_ICONWARNING);
+            return false;
+        }
+
+        g_isLoadingInput = true;
+        setEditText(g_inputEdit, text);
+        g_isLoadingInput = false;
+
+        SendMessageW(g_inputEdit, EM_SETSEL, 0, 0);
+        SendMessageW(g_inputEdit, EM_SCROLLCARET, 0, 0);
+        SetFocus(g_inputEdit);
+
+        setStatus(std::wstring(L"Loaded ") + fileNameFromPath(path) + L" into Input.");
+        if (isChecked(g_autoCheck))
+            convertNow();
+
+        return true;
+    }
+
+    LRESULT CALLBACK inputEditSubclassProc(
+        HWND hwnd,
+        UINT msg,
+        WPARAM wParam,
+        LPARAM lParam,
+        UINT_PTR subclassId,
+        DWORD_PTR)
+    {
+        if (msg == WM_DROPFILES)
+        {
+            HDROP drop = reinterpret_cast<HDROP>(wParam);
+            const UINT fileCount = DragQueryFileW(drop, 0xFFFFFFFFU, nullptr, 0);
+
+            if (fileCount != 1U)
+            {
+                setStatus(L"Drop one text file at a time onto the Input pane.");
+                MessageBeep(MB_ICONWARNING);
+                DragFinish(drop);
+                return 0;
+            }
+
+            const UINT pathLength = DragQueryFileW(drop, 0U, nullptr, 0);
+            std::wstring path(static_cast<std::size_t>(pathLength) + 1U, L'\0');
+            DragQueryFileW(drop, 0U, path.data(), pathLength + 1U);
+            path.resize(pathLength);
+
+            DragFinish(drop);
+            loadDroppedTextFile(path);
+            return 0;
+        }
+
+        if (msg == WM_NCDESTROY)
+        {
+            DragAcceptFiles(hwnd, FALSE);
+            RemoveWindowSubclass(hwnd, inputEditSubclassProc, subclassId);
+        }
+
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+
     xploder_psx::Key selectedEncryptionKey()
     {
         switch (comboIndex(g_keyCombo))
@@ -251,7 +463,8 @@ namespace
         const bool encrypt = comboIndex(g_modeCombo) == 1;
         EnableWindow(g_keyCombo, encrypt ? TRUE : FALSE);
         EnableWindow(g_groupCheck, encrypt ? TRUE : FALSE);
-        // Payload key is used for encrypting type 5 blocks. Decrypt reads key from header.
+        // The selected Type 5 payload key is used when encrypting both normal
+        // and nested active Type 5 blocks. Decrypt reads the key from encrypted headers.
         EnableWindow(g_payloadKeyCombo, encrypt ? TRUE : FALSE);
     }
 
@@ -337,14 +550,26 @@ namespace
         setStatus(L"Cleared.");
     }
 
-    void layoutControls(HWND hwnd)
+    struct PaneLayout
+    {
+        int leftWidth = 0;
+        int rightWidth = 0;
+        int splitterX = 0;
+        int rightX = 0;
+        int labelY = 0;
+        int labelHeight = 0;
+        int editorY = 0;
+        int editorHeight = 0;
+    };
+
+    PaneLayout calculatePaneLayout(HWND hwnd)
     {
         RECT rc{};
         GetClientRect(hwnd, &rc);
+
         const int width = rc.right - rc.left;
         const int height = rc.bottom - rc.top;
-        const int margin = 10;
-        const int gap = 10;
+        const int margin = LayoutMargin;
         const int top = 10;
         const int controlsH = 76;
         const int labelH = 20;
@@ -352,13 +577,207 @@ namespace
         const int editorTop = top + controlsH + labelH + 4;
         const int editorBottom = height - statusH - margin;
         const int editorH = std::max(40, editorBottom - editorTop);
-        const int editorW = std::max(100, (width - margin * 2 - gap) / 2);
-        const int rightX = margin + editorW + gap;
+
+        const int availablePaneWidth = std::max(0, width - margin * 2 - SplitterWidth);
+        const int effectiveMinimum = std::min(MinimumPaneWidth, availablePaneWidth / 2);
+        int leftPaneWidth = static_cast<int>(availablePaneWidth * g_splitRatio);
+        leftPaneWidth = std::clamp(
+            leftPaneWidth,
+            effectiveMinimum,
+            std::max(effectiveMinimum, availablePaneWidth - effectiveMinimum));
+
+        PaneLayout layout;
+        layout.leftWidth = leftPaneWidth;
+        layout.rightWidth = std::max(0, availablePaneWidth - leftPaneWidth);
+        layout.splitterX = margin + leftPaneWidth;
+        layout.rightX = layout.splitterX + SplitterWidth;
+        layout.labelY = top + controlsH;
+        layout.labelHeight = labelH;
+        layout.editorY = editorTop;
+        layout.editorHeight = editorH;
+        return layout;
+    }
+
+    bool deferControl(HDWP& batch, HWND control, int x, int y, int width, int height, UINT flags)
+    {
+        if (batch == nullptr || control == nullptr)
+            return false;
+
+        batch = DeferWindowPos(batch, control, nullptr, x, y, width, height, flags);
+        return batch != nullptr;
+    }
+
+    void layoutPaneControls(HWND hwnd, bool repaintImmediately)
+    {
+        if (hwnd == nullptr)
+            return;
+
+        const PaneLayout layout = calculatePaneLayout(hwnd);
+        constexpr UINT flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER;
+
+        // Defer the five pane-window moves so Windows commits them together.
+        // Do not use SWP_NOREDRAW here: it leaves stale pixels behind when an
+        // EDIT control changes size or moves across another child window.
+        HDWP batch = BeginDeferWindowPos(5);
+        bool batched = batch != nullptr;
+        if (batched)
+            batched = deferControl(batch, g_inputLabel, LayoutMargin, layout.labelY, layout.leftWidth, layout.labelHeight, flags);
+        if (batched)
+            batched = deferControl(batch, g_outputLabel, layout.rightX, layout.labelY, layout.rightWidth, layout.labelHeight, flags);
+        if (batched)
+            batched = deferControl(batch, g_inputEdit, LayoutMargin, layout.editorY, layout.leftWidth, layout.editorHeight, flags);
+        if (batched)
+            batched = deferControl(batch, g_splitter, layout.splitterX, layout.labelY, SplitterWidth, layout.labelHeight + 4 + layout.editorHeight, flags);
+        if (batched)
+            batched = deferControl(batch, g_outputEdit, layout.rightX, layout.editorY, layout.rightWidth, layout.editorHeight, flags);
+
+        if (batched)
+        {
+            EndDeferWindowPos(batch);
+        }
+        else
+        {
+            SetWindowPos(g_inputLabel, nullptr, LayoutMargin, layout.labelY, layout.leftWidth, layout.labelHeight, flags);
+            SetWindowPos(g_outputLabel, nullptr, layout.rightX, layout.labelY, layout.rightWidth, layout.labelHeight, flags);
+            SetWindowPos(g_inputEdit, nullptr, LayoutMargin, layout.editorY, layout.leftWidth, layout.editorHeight, flags);
+            SetWindowPos(g_splitter, nullptr, layout.splitterX, layout.labelY, SplitterWidth, layout.labelHeight + 4 + layout.editorHeight, flags);
+            SetWindowPos(g_outputEdit, nullptr, layout.rightX, layout.editorY, layout.rightWidth, layout.editorHeight, flags);
+        }
+
+        // A committed layout happens only after drag release or a window resize.
+        // Force one clean paint then; mouse movement itself only moves the thin
+        // splitter preview and therefore does not repaint both large editors.
+        if (repaintImmediately)
+        {
+            RedrawWindow(hwnd, nullptr, nullptr,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        }
+    }
+
+    void updateSplitterFromCursor(HWND splitter, bool commitLayout)
+    {
+        HWND parent = GetParent(splitter);
+        if (parent == nullptr)
+            return;
+
+        RECT rc{};
+        GetClientRect(parent, &rc);
+        const int clientWidth = rc.right - rc.left;
+        const int availableWidth = clientWidth - LayoutMargin * 2 - SplitterWidth;
+        if (availableWidth <= 0)
+            return;
+
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        ScreenToClient(parent, &cursor);
+
+        const int effectiveMinimum = std::min(MinimumPaneWidth, availableWidth / 2);
+        const int requestedLeftWidth = cursor.x - LayoutMargin - SplitterWidth / 2;
+        const int leftWidth = std::clamp(
+            requestedLeftWidth,
+            effectiveMinimum,
+            availableWidth - effectiveMinimum);
+
+        const double newRatio = static_cast<double>(leftWidth) / static_cast<double>(availableWidth);
+        const int previewX = LayoutMargin + leftWidth;
+
+        g_splitRatio = newRatio;
+
+        if (commitLayout)
+        {
+            layoutPaneControls(parent, true);
+            return;
+        }
+
+        // During the drag, move only the narrow splitter as a preview.  The
+        // expensive Input/Output EDIT controls are resized once on release.
+        // Keeping the splitter on top makes the preview visible over either pane.
+        RECT splitterRect{};
+        GetWindowRect(splitter, &splitterRect);
+        const int splitterHeight = splitterRect.bottom - splitterRect.top;
+        const PaneLayout layout = calculatePaneLayout(parent);
+        SetWindowPos(
+            splitter,
+            HWND_TOP,
+            previewX,
+            layout.labelY,
+            SplitterWidth,
+            splitterHeight,
+            SWP_NOACTIVATE | SWP_NOCOPYBITS);
+        UpdateWindow(splitter);
+    }
+
+    LRESULT CALLBACK splitterProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+    {
+        switch (msg)
+        {
+            case WM_SETCURSOR:
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+                return TRUE;
+
+            case WM_LBUTTONDOWN:
+                g_isDraggingSplitter = true;
+                SetCapture(hwnd);
+                updateSplitterFromCursor(hwnd, false);
+                return 0;
+
+            case WM_MOUSEMOVE:
+                if (g_isDraggingSplitter && GetCapture() == hwnd)
+                    updateSplitterFromCursor(hwnd, false);
+                return 0;
+
+            case WM_LBUTTONUP:
+                if (g_isDraggingSplitter)
+                {
+                    updateSplitterFromCursor(hwnd, true);
+                    g_isDraggingSplitter = false;
+                    if (GetCapture() == hwnd)
+                        ReleaseCapture();
+                }
+                return 0;
+
+            case WM_CAPTURECHANGED:
+                if (g_isDraggingSplitter)
+                {
+                    g_isDraggingSplitter = false;
+                    HWND parent = GetParent(hwnd);
+                    if (parent != nullptr)
+                        layoutPaneControls(parent, true);
+                }
+                return 0;
+
+            case WM_PAINT:
+            {
+                PAINTSTRUCT ps{};
+                HDC dc = BeginPaint(hwnd, &ps);
+                RECT rc{};
+                GetClientRect(hwnd, &rc);
+                FillRect(dc, &rc, GetSysColorBrush(COLOR_3DFACE));
+
+                const int centerX = (rc.right - rc.left) / 2;
+                RECT grip{centerX, rc.top + 6, centerX + 1, std::max(rc.top + 6, rc.bottom - 6)};
+                FillRect(dc, &grip, GetSysColorBrush(COLOR_3DSHADOW));
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+        }
+
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+
+    void layoutControls(HWND hwnd)
+    {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        const int width = rc.right - rc.left;
+        const int height = rc.bottom - rc.top;
+        const int margin = LayoutMargin;
+        const int gap = 10;
+        const int top = 10;
+        const int statusH = 24;
 
         int x = margin;
         int y = top;
-        const int comboH = 24;
-        const int labelW = 86;
         const int comboW = 210;
 
         MoveWindow(g_modeCombo, x, y + 18, comboW, 200, TRUE);
@@ -366,8 +785,8 @@ namespace
         x += comboW + gap;
         MoveWindow(g_keyCombo, x, y + 18, 150, 200, TRUE);
         x += 150 + gap;
-        MoveWindow(g_payloadKeyCombo, x, y + 18, 170, 200, TRUE);
-        x += 170 + gap;
+        MoveWindow(g_payloadKeyCombo, x, y + 18, 220, 200, TRUE);
+        x += 220 + gap;
         MoveWindow(g_convertButton, x, y + 16, 90, 28, TRUE);
         x += 94;
         MoveWindow(g_copyButton, x, y + 16, 105, 28, TRUE);
@@ -387,10 +806,7 @@ namespace
         x += 185;
         MoveWindow(g_autoCheck, x, y, 115, 22, TRUE);
 
-        MoveWindow(g_inputLabel, margin, top + controlsH, editorW, labelH, TRUE);
-        MoveWindow(g_outputLabel, rightX, top + controlsH, editorW, labelH, TRUE);
-        MoveWindow(g_inputEdit, margin, editorTop, editorW, editorH, TRUE);
-        MoveWindow(g_outputEdit, rightX, editorTop, editorW, editorH, TRUE);
+        layoutPaneControls(hwnd, true);
         MoveWindow(g_statusLabel, margin, height - statusH, width - margin * 2, statusH, TRUE);
     }
 
@@ -416,8 +832,8 @@ namespace
         SendMessageW(g_keyCombo, CB_SETCURSEL, 1, 0);
 
         g_payloadKeyCombo = createControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, IdPayloadKeyCombo, hwnd);
-        addComboItem(g_payloadKeyCombo, L"Type 5 payload key 6");
-        addComboItem(g_payloadKeyCombo, L"Type 5 payload key 7");
+        addComboItem(g_payloadKeyCombo, L"Type 5 key 6 (normal + nested)");
+        addComboItem(g_payloadKeyCombo, L"Type 5 key 7 (normal + nested)");
         SendMessageW(g_payloadKeyCombo, CB_SETCURSEL, 0, 0);
 
         g_convertButton = createControl(L"BUTTON", L"Convert", BS_PUSHBUTTON | WS_TABSTOP, 0, IdConvertButton, hwnd);
@@ -431,12 +847,16 @@ namespace
         SendMessageW(g_prefixCheck, BM_SETCHECK, BST_CHECKED, 0);
         g_autoCheck = createControl(L"BUTTON", L"Auto Convert", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdAutoCheck, hwnd);
 
-        g_inputLabel = createControl(L"STATIC", L"Input", 0, 0, 0, hwnd);
+        g_inputLabel = createControl(L"STATIC", L"Input (drop a text file here)", 0, 0, 0, hwnd);
         g_outputLabel = createControl(L"STATIC", L"Output", 0, 0, 0, hwnd);
+        g_splitter = createControl(SplitterClassName, L"", 0, 0, IdSplitter, hwnd);
 
         const DWORD editStyle = WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN;
         g_inputEdit = createControl(L"EDIT", L"", editStyle, WS_EX_CLIENTEDGE, IdInputEdit, hwnd);
         g_outputEdit = createControl(L"EDIT", L"", editStyle | ES_READONLY, WS_EX_CLIENTEDGE, IdOutputEdit, hwnd);
+
+        SetWindowSubclass(g_inputEdit, inputEditSubclassProc, 1U, 0);
+        DragAcceptFiles(g_inputEdit, TRUE);
 
         SendMessageW(g_inputEdit, EM_SETLIMITTEXT, 0, 0);
         SendMessageW(g_outputEdit, EM_SETLIMITTEXT, 0, 0);
@@ -498,7 +918,7 @@ namespace
                         convertNow();
                     return 0;
                 }
-                if (id == IdInputEdit && notify == EN_CHANGE && isChecked(g_autoCheck) && !g_isConverting)
+                if (id == IdInputEdit && notify == EN_CHANGE && isChecked(g_autoCheck) && !g_isConverting && !g_isLoadingInput)
                 {
                     convertNow();
                     return 0;
@@ -532,6 +952,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     wc.lpszClassName = WindowClassName;
 
     if (RegisterClassExW(&wc) == 0)
+        return 1;
+
+    WNDCLASSEXW splitterClass{};
+    splitterClass.cbSize = sizeof(splitterClass);
+    splitterClass.lpfnWndProc = splitterProc;
+    splitterClass.hInstance = instance;
+    splitterClass.hCursor = LoadCursorW(nullptr, IDC_SIZEWE);
+    splitterClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_3DFACE + 1);
+    splitterClass.lpszClassName = SplitterClassName;
+
+    if (RegisterClassExW(&splitterClass) == 0)
         return 1;
 
     HWND hwnd = CreateWindowExW(

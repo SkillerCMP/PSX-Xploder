@@ -52,8 +52,9 @@ namespace xploder_psx
     struct MassWriteInfo
     {
         int payloadKey = 0;
-        int payloadSize = 0;       // exact number of copied payload bytes
-        int payloadLineCount = 0;  // ceil(payloadSize / 6)
+        int payloadSize = 0;        // value written to the active header
+        int sourcePayloadSize = 0;  // bytes supplied by following source rows
+        int payloadLineCount = 0;   // ceil(sourcePayloadSize / 6)
         bool isType6 = false;
     };
 
@@ -303,18 +304,27 @@ namespace xploder_psx
             info.payloadKey = publicHeader[3] & 0x0F;
             const int baseSize = (static_cast<int>(publicHeader[4]) << 8) | publicHeader[5];
             info.payloadSize = baseSize + 0x12;
+
+            // Type 6 source rows include the fixed 0x12-byte descriptor plus
+            // the public base-size bytes, so the full active size is consumed.
+            info.sourcePayloadSize = info.payloadSize;
         }
         else
         {
             info.payloadKey = publicHeader[4] >> 4;
             const int baseSize = ((publicHeader[4] & 0x0F) << 8) | publicHeader[5];
             info.payloadSize = baseSize + 0x06;
+
+            // Type 5 adds 0x06 to the active header value, but those six bytes
+            // are not another following payload row. Only the public base-size
+            // bytes are supplied after the header.
+            info.sourcePayloadSize = baseSize;
         }
 
-        if (info.payloadSize <= 0)
+        if (info.payloadSize <= 0 || info.sourcePayloadSize <= 0)
             return false;
 
-        info.payloadLineCount = (info.payloadSize + static_cast<int>(CodeLength) - 1) / static_cast<int>(CodeLength);
+        info.payloadLineCount = (info.sourcePayloadSize + static_cast<int>(CodeLength) - 1) / static_cast<int>(CodeLength);
         return true;
     }
 
@@ -370,7 +380,10 @@ namespace xploder_psx
         {
             infoOut->payloadKey = payloadKey;
             infoOut->payloadSize = payloadSize;
-            infoOut->payloadLineCount = (payloadSize + static_cast<int>(CodeLength) - 1) / static_cast<int>(CodeLength);
+            infoOut->sourcePayloadSize = isType6 ? payloadSize : baseSize;
+            infoOut->payloadLineCount =
+                (infoOut->sourcePayloadSize + static_cast<int>(CodeLength) - 1) /
+                static_cast<int>(CodeLength);
             infoOut->isType6 = isType6;
         }
 
@@ -415,11 +428,22 @@ namespace xploder_psx
             return false;
 
         Code header = input[0];
-        const int payloadSize = (static_cast<int>(header[4]) << 8) | header[5];
-        const int payloadLineCount = (payloadSize + static_cast<int>(CodeLength) - 1) / static_cast<int>(CodeLength);
-
-        if (payloadSize <= 0 || input.size() < static_cast<std::size_t>(1 + payloadLineCount))
+        const int codeType = header[0] & 0xF0;
+        if (codeType != 0x50 && codeType != 0x60)
             return false;
+
+        const bool isType6 = codeType == 0x60;
+        const int payloadSize = (static_cast<int>(header[4]) << 8) | header[5];
+        const int sourcePayloadSize = isType6 ? payloadSize : payloadSize - 0x06;
+        const int payloadLineCount =
+            (sourcePayloadSize + static_cast<int>(CodeLength) - 1) /
+            static_cast<int>(CodeLength);
+
+        if (payloadSize <= 0 || sourcePayloadSize <= 0 ||
+            input.size() < static_cast<std::size_t>(1 + payloadLineCount))
+        {
+            return false;
+        }
 
         if (!encryptMassWriteHeaderFromActive(header, normalLineKey, payloadKey, &info))
             return false;

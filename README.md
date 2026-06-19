@@ -38,10 +38,14 @@ This project focuses on practical PlayStation cheat-code research, especially:
 - Convert encrypted Xploder PSX codes to decrypted RAW-style lines.
 - Encrypt RAW-style Xploder lines back to Xploder format.
 - Auto-detect RAW vs encrypted input where possible.
+- Normalize nested Type 5 headers inside Type 6 blocks into active form, such as `$50007610 00B6`.
+- Rebuild normal and nested Type 5 headers using the selected Type 5 payload key.
 - Preserve CMP-style metadata and directives.
-- Support drag-and-drop text input.
+- Drop one text file directly onto the Input pane to load it.
+- Dropped files support UTF-8, UTF-8 BOM, UTF-16 LE/BE BOM, and legacy ANSI text.
 - Normalize pasted or dropped line endings.
 - Native Windows desktop GUI.
+- Draggable divider for resizing the Input and Output panes. The divider previews the new position while dragging, then resizes both panes cleanly on release.
 - Simple MSVC build script.
 - Optional Win32 / Win64 build output.
 - Custom glowing neon red **X** icon.
@@ -100,7 +104,7 @@ This allows the tool to be used for practical code-list conversion without destr
 Expected folder layout:
 
 ```text
-build-gui-msvc.cmd
+build.cmd
 src/
   XploderConverterGui.cpp
   XploderCmpConverter.hpp
@@ -133,7 +137,7 @@ This project is intended to build with **Microsoft Visual C++ / MSVC**.
 From a normal Command Prompt, run:
 
 ```bat
-build-gui-msvc.cmd
+build.cmd
 ```
 
 The script can prompt for the target build:
@@ -146,11 +150,11 @@ The script can prompt for the target build:
 You can also pass the target directly:
 
 ```bat
-build-gui-msvc.cmd win32
+build.cmd win32
 ```
 
 ```bat
-build-gui-msvc.cmd win64
+build.cmd win64
 ```
 
 The script attempts to locate and initialize the Visual Studio Developer Command Prompt environment automatically.
@@ -167,10 +171,12 @@ If you are already inside a Visual Studio Developer Command Prompt, the script s
 <br>
 
 1. Open `XploderConverterGui.exe`.
-2. Paste or drag Xploder code text into the input box.
+2. Paste code text into the Input pane, or drop one text file directly onto it.
 3. Choose decrypt or encrypt mode.
 4. Select the desired key style when encrypting.
 5. Copy the converted output from the output box.
+
+When **Auto Convert** is enabled, a dropped file is converted immediately after it is loaded. Only one file is accepted per drop, with a 64 MB safety limit.
 
 Example encrypted input:
 
@@ -212,7 +218,13 @@ The active version contains the expanded payload byte count.
 
 Payload records after the Type 5 header are treated as payload data, not as normal standalone cheat lines.
 
+For public Type 5 headers, the converter uses the public base byte count to decide how many following payload rows belong to the block. The active header still receives the loader-expanded value. For example, public value `607C` consumes `0x7C` payload bytes (21 six-byte rows) and becomes active value `0082`; a following Type 5 header is then processed as a separate block instead of being swallowed as a 22nd payload row.
+
 This converter includes support for that behavior based on memory-dump testing and active-list comparison.
+
+### Type 6 descriptor note
+
+Type 6 is a special descriptor/bootstrap format, not a normal Type 5 payload block. The loader expands the Type 6 byte count by `0x12`. Type 6 payload keys `6` and `7` use forced payload transforms; other Type 6 payload keys, including the common key `0`, are copied unchanged.
 
 </details>
 
@@ -303,6 +315,6 @@ GNU General Public License v3.0
 
 <div align="center">
 
-**Xploder PSX Converter v1.00**
+**Xploder PSX Converter v1.01**
 
 </div>
