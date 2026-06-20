@@ -4,19 +4,23 @@
 // Full CMP-style text converter using XploderMemoryCryptEngine.hpp.
 //
 // Decrypt mode:
-//   XplorerPro / FX encrypted text -> active/runtime CMP-style RAW text.
-//   Type 5/6 mass-write blocks are converted to the active header + payload bytes.
-//   Type 6 copy-route blocks can carry an embedded Type 5 continuation.
+//   XplorerPro / FX encrypted text -> canonical external CMP-style RAW text.
+//   Type 5/6 headers retain their canonical external size fields. Type 5 uses
+//   a direct byte count; Type 6 counts bytes after its first two inline payload bytes.
+//   Loader-only expanded sizes stay internal.
 //
 // Encrypt mode:
-//   active/runtime CMP-style RAW text -> XplorerPro / FX encrypted text.
-//   Type 5/6 mass-write blocks are rebuilt to the public header and encrypted payload lines.
+//   canonical external CMP-style RAW text -> XplorerPro / FX encrypted text.
+//   Type 5 and Type 6 are parsed as complete structured blocks. A Type 5 block
+//   immediately following Type 6 is handled as the next block, not as embedded
+//   Type 6 payload data.
 
 #include "XploderMemoryCryptEngine.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstddef>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -85,9 +89,789 @@ namespace xploder_converter
         return lines;
     }
 
+
+    inline bool startsWithIgnoreCase(std::string_view text, std::string_view prefix) noexcept
+    {
+        if (text.size() < prefix.size())
+            return false;
+
+        for (std::size_t i = 0; i < prefix.size(); ++i)
+        {
+            const unsigned char left = static_cast<unsigned char>(text[i]);
+            const unsigned char right = static_cast<unsigned char>(prefix[i]);
+            if (std::tolower(left) != std::tolower(right))
+                return false;
+        }
+        return true;
+    }
+
+    inline std::size_t findIgnoreCase(
+        std::string_view text,
+        std::string_view needle,
+        std::size_t start = 0) noexcept
+    {
+        if (needle.empty())
+            return start <= text.size() ? start : std::string_view::npos;
+        if (start > text.size() || needle.size() > text.size() - start)
+            return std::string_view::npos;
+
+        for (std::size_t position = start; position + needle.size() <= text.size(); ++position)
+        {
+            bool matches = true;
+            for (std::size_t i = 0; i < needle.size(); ++i)
+            {
+                const unsigned char left = static_cast<unsigned char>(text[position + i]);
+                const unsigned char right = static_cast<unsigned char>(needle[i]);
+                if (std::tolower(left) != std::tolower(right))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches)
+                return position;
+        }
+
+        return std::string_view::npos;
+    }
+
+    inline std::size_t rfindIgnoreCase(
+        std::string_view text,
+        std::string_view needle,
+        std::size_t before = std::string_view::npos) noexcept
+    {
+        if (needle.empty())
+            return std::min(before, text.size());
+        if (needle.size() > text.size())
+            return std::string_view::npos;
+
+        const std::size_t latestStart = text.size() - needle.size();
+        std::size_t start = before == std::string_view::npos
+            ? latestStart
+            : std::min(before, latestStart);
+
+        for (;;)
+        {
+            bool matches = true;
+            for (std::size_t i = 0; i < needle.size(); ++i)
+            {
+                const unsigned char left = static_cast<unsigned char>(text[start + i]);
+                const unsigned char right = static_cast<unsigned char>(needle[i]);
+                if (std::tolower(left) != std::tolower(right))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches)
+                return start;
+            if (start == 0)
+                break;
+            --start;
+        }
+
+        return std::string_view::npos;
+    }
+
+    // Splits title lines such as:
+    //   +Infinite Health by Code Master , Crypt: Pro Action Replay/GameShark
+    // into a title that keeps its `Crypt:` metadata and a separate CMP credit line.
+    // Only the inline `by Author` portion is removed from the title.
+    inline bool trySplitBatchInlineCreditLine(
+        std::string_view line,
+        std::string& title,
+        std::string& normalizedCredit)
+    {
+        title.clear();
+        normalizedCredit.clear();
+
+        const std::string t = trim(line);
+        if (t.empty())
+            return false;
+
+        const std::size_t cryptPosition = findIgnoreCase(t, "crypt:");
+        if (cryptPosition == std::string_view::npos)
+            return false;
+
+        std::size_t commaPosition = cryptPosition;
+        while (commaPosition > 0 &&
+               std::isspace(static_cast<unsigned char>(t[commaPosition - 1])))
+        {
+            --commaPosition;
+        }
+        if (commaPosition == 0 || t[commaPosition - 1] != ',')
+            return false;
+        --commaPosition;
+
+        const std::size_t bySpacePosition = rfindIgnoreCase(
+            t, " by ", commaPosition);
+        const std::size_t byColonPosition = rfindIgnoreCase(
+            t, " by:", commaPosition);
+
+        std::size_t byPosition = std::string_view::npos;
+        std::size_t authorStart = 0;
+        if (bySpacePosition != std::string_view::npos &&
+            (byColonPosition == std::string_view::npos || bySpacePosition > byColonPosition))
+        {
+            byPosition = bySpacePosition;
+            authorStart = byPosition + 4U;
+        }
+        else if (byColonPosition != std::string_view::npos)
+        {
+            byPosition = byColonPosition;
+            authorStart = byPosition + 4U;
+        }
+        else
+        {
+            return false;
+        }
+
+        const std::string titlePrefix = trim(std::string_view(t).substr(0, byPosition));
+        const std::string cryptSuffix = trim(std::string_view(t).substr(commaPosition));
+        title = titlePrefix;
+        if (!cryptSuffix.empty())
+        {
+            if (!title.empty())
+                title.push_back(' ');
+            title += cryptSuffix;
+        }
+
+        const std::string author = trim(
+            std::string_view(t).substr(authorStart, commaPosition - authorStart));
+        if (titlePrefix.empty() || author.empty())
+        {
+            title.clear();
+            return false;
+        }
+
+        normalizedCredit = "%Credits: " + author;
+        return true;
+    }
+
+    inline bool tryNormalizeBatchCreditLine(std::string_view line, std::string& normalized)
+    {
+        normalized.clear();
+        const std::string t = trim(line);
+        if (t.empty())
+            return false;
+
+        std::string author;
+        if (startsWithIgnoreCase(t, "%credits:"))
+        {
+            author = trim(std::string_view(t).substr(9));
+        }
+        else if (startsWithIgnoreCase(t, "by:"))
+        {
+            author = trim(std::string_view(t).substr(3));
+        }
+        else if (startsWithIgnoreCase(t, "by "))
+        {
+            author = trim(std::string_view(t).substr(3));
+        }
+        else
+        {
+            return false;
+        }
+
+        while (!author.empty() && std::isspace(static_cast<unsigned char>(author.back())))
+            author.pop_back();
+        if (!author.empty() && author.back() == ',')
+        {
+            author.pop_back();
+            author = trim(author);
+        }
+
+        if (author.empty())
+            return false;
+
+        normalized = "%Credits: " + author;
+        return true;
+    }
+
+    inline bool tryNormalizeBatchMetadataLine(std::string_view line, std::string& normalized)
+    {
+        normalized.clear();
+        const std::string t = trim(line);
+        if (t.empty())
+            return false;
+
+        // CMP metadata directives such as ^3 = NAME: and ^2 = GameID:
+        // are structure lines, not code names. Remove an accidental leading +
+        // from earlier conversions and otherwise preserve the line unchanged.
+        if (t[0] == '^')
+        {
+            normalized = t;
+            return true;
+        }
+
+        if (t.size() > 1U && t[0] == '+' && t[1] == '^')
+        {
+            normalized = t.substr(1U);
+            return true;
+        }
+
+        return false;
+    }
+
+    // DuckStation extended cheat rows use an 8-hex address and an 8-character
+    // value field (16 total code characters), for example:
+    //   9006D9D8 EF6FF7C8
+    //   9000C03C 240B????
+    // They are not Xploder 6-byte records and must never be decrypted as one.
+    // Normalize their display for folder batches and preserve them unchanged in
+    // the normal conversion pass. Wildcards are allowed only in the value field.
+    inline bool tryNormalizeDuckStationCodeLine(
+        std::string_view line,
+        std::string& normalized)
+    {
+        normalized.clear();
+        const std::string t = trim(line);
+        if (t.empty())
+            return false;
+
+        std::size_t position = 0;
+        if (t[position] == '$')
+        {
+            ++position;
+            while (position < t.size() &&
+                   std::isspace(static_cast<unsigned char>(t[position])))
+            {
+                ++position;
+            }
+        }
+
+        auto appendAddressHex = [&](std::size_t start, std::string& destination) -> bool
+        {
+            if (start + 8U > t.size())
+                return false;
+            for (std::size_t i = 0; i < 8U; ++i)
+            {
+                const char c = t[start + i];
+                if (!isHex(c))
+                    return false;
+                destination.push_back(static_cast<char>(
+                    std::toupper(static_cast<unsigned char>(c))));
+            }
+            return true;
+        };
+
+        auto appendValue = [&](std::size_t start, std::string& destination) -> bool
+        {
+            if (start + 8U > t.size())
+                return false;
+            for (std::size_t i = 0; i < 8U; ++i)
+            {
+                const char c = t[start + i];
+                if (c == '?')
+                {
+                    destination.push_back('?');
+                }
+                else if (isHex(c))
+                {
+                    destination.push_back(static_cast<char>(
+                        std::toupper(static_cast<unsigned char>(c))));
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        std::string address;
+        address.reserve(8U);
+        if (!appendAddressHex(position, address))
+            return false;
+
+        std::size_t valueStart = position + 8U;
+        const std::size_t separatorStart = valueStart;
+        while (valueStart < t.size() &&
+               std::isspace(static_cast<unsigned char>(t[valueStart])))
+        {
+            ++valueStart;
+        }
+
+        // Accept both the normal spaced form and compact 16-character form.
+        // A non-space separator is not a DuckStation row.
+        if (valueStart == separatorStart && valueStart < t.size() &&
+            !isHex(t[valueStart]) && t[valueStart] != '?')
+        {
+            return false;
+        }
+
+        std::string value;
+        value.reserve(8U);
+        if (!appendValue(valueStart, value))
+            return false;
+
+        const std::size_t end = valueStart + 8U;
+        if (end < t.size() && (isHex(t[end]) || t[end] == '?'))
+            return false;
+        if (end < t.size() &&
+            !std::isspace(static_cast<unsigned char>(t[end])) &&
+            t[end] != ';' && t[end] != '/' && t[end] != '#')
+        {
+            return false;
+        }
+
+        normalized = "$" + address + " " + value;
+        const std::string suffix = trim(std::string_view(t).substr(end));
+        if (!suffix.empty())
+            normalized += "\t" + suffix;
+        return true;
+    }
+
+    inline bool tryNormalizeBatchCodeLine(std::string_view line, std::string& normalized)
+    {
+        normalized.clear();
+        const std::string t = trim(line);
+        if (t.empty())
+            return false;
+
+        // Check DuckStation's 8+8 format before Xploder's shorter 8+4 and
+        // wildcard forms so the first 12 characters are never misread as a
+        // complete Xploder code.
+        if (tryNormalizeDuckStationCodeLine(t, normalized))
+            return true;
+
+        std::size_t position = 0;
+        if (t[position] == '$')
+        {
+            ++position;
+            while (position < t.size() && std::isspace(static_cast<unsigned char>(t[position])))
+                ++position;
+        }
+
+        auto appendHex = [&](std::size_t start, std::size_t count, std::string& destination) -> bool
+        {
+            if (start + count > t.size())
+                return false;
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const char c = t[start + i];
+                if (!isHex(c))
+                    return false;
+                destination.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+            }
+            return true;
+        };
+
+        auto appendWildcardValue = [&](std::size_t start, std::size_t count, std::string& destination) -> bool
+        {
+            if (start + count > t.size())
+                return false;
+
+            bool containsWildcard = false;
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const char c = t[start + i];
+                if (c == '?')
+                {
+                    containsWildcard = true;
+                    destination.push_back('?');
+                }
+                else if (isHex(c))
+                {
+                    destination.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+                }
+                else
+                {
+                    return false;
+                }
+            }
+            return containsWildcard;
+        };
+
+        auto validCodeEnd = [&](std::size_t end) -> bool
+        {
+            if (end < t.size() && (isHex(t[end]) || t[end] == '?'))
+                return false;
+
+            return end >= t.size() ||
+                std::isspace(static_cast<unsigned char>(t[end])) ||
+                t[end] == ';' || t[end] == '/' || t[end] == '#';
+        };
+
+        auto finishWildcard = [&](const std::string& address, const std::string& value, std::size_t end) -> bool
+        {
+            if (!validCodeEnd(end))
+                return false;
+
+            normalized = "$" + address + " " + value;
+            const std::string suffix = trim(std::string_view(t).substr(end));
+            if (!suffix.empty())
+                normalized += "\t" + suffix;
+            return true;
+        };
+
+        // Wildcard values are display/template rows and are intentionally not
+        // decrypted. Accept either two or four value characters, compact or
+        // separated, and allow mixed hexadecimal/question-mark placeholders.
+        // Examples: 700FB57E??, 700FB57E ????, 700F-B57E-12??.
+        {
+            std::string address;
+            address.reserve(8);
+
+            std::size_t valueStart = std::string_view::npos;
+            if (position + 10U <= t.size() &&
+                t[position + 4U] == '-' && t[position + 9U] == '-' &&
+                appendHex(position, 4U, address) &&
+                appendHex(position + 5U, 4U, address))
+            {
+                valueStart = position + 10U;
+            }
+            else
+            {
+                // Space-grouped 4 4 4 form, for example:
+                // 8007 8448 ???? or 8007 8448 ??
+                address.clear();
+                std::string groupedAddress;
+                groupedAddress.reserve(8);
+                if (appendHex(position, 4U, groupedAddress))
+                {
+                    std::size_t secondGroup = position + 4U;
+                    const std::size_t firstSeparator = secondGroup;
+                    while (secondGroup < t.size() &&
+                           std::isspace(static_cast<unsigned char>(t[secondGroup])))
+                    {
+                        ++secondGroup;
+                    }
+
+                    if (secondGroup > firstSeparator &&
+                        appendHex(secondGroup, 4U, groupedAddress))
+                    {
+                        std::size_t groupedValue = secondGroup + 4U;
+                        const std::size_t secondSeparator = groupedValue;
+                        while (groupedValue < t.size() &&
+                               std::isspace(static_cast<unsigned char>(t[groupedValue])))
+                        {
+                            ++groupedValue;
+                        }
+
+                        if (groupedValue > secondSeparator)
+                        {
+                            address = std::move(groupedAddress);
+                            valueStart = groupedValue;
+                        }
+                    }
+                }
+
+                if (valueStart == std::string_view::npos)
+                {
+                    address.clear();
+                    if (appendHex(position, 8U, address))
+                    {
+                        valueStart = position + 8U;
+                        while (valueStart < t.size() &&
+                               std::isspace(static_cast<unsigned char>(t[valueStart])))
+                        {
+                            ++valueStart;
+                        }
+                    }
+                }
+            }
+
+            if (valueStart != std::string_view::npos)
+            {
+                for (const std::size_t valueLength : {4U, 2U})
+                {
+                    std::string value;
+                    value.reserve(valueLength);
+                    if (appendWildcardValue(valueStart, valueLength, value) &&
+                        finishWildcard(address, value, valueStart + valueLength))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // RAW 8-bit write shorthand may use an 8-digit address with a
+        // two-character value, for example 3007DE60 00. Recognize the same
+        // compact, hyphen-grouped, and space-grouped layouts as the normal
+        // 8 + 4 form. These rows are normalized for display and intentionally
+        // pass through decrypt mode unchanged because they are already RAW.
+        {
+            std::string address;
+            address.reserve(8);
+            std::size_t valueStart = std::string_view::npos;
+
+            // 3007-DE60-00
+            if (position + 12U <= t.size() &&
+                t[position + 4U] == '-' && t[position + 9U] == '-' &&
+                appendHex(position, 4U, address) &&
+                appendHex(position + 5U, 4U, address))
+            {
+                valueStart = position + 10U;
+            }
+            else
+            {
+                // 3007 DE60 00
+                address.clear();
+                std::string groupedAddress;
+                groupedAddress.reserve(8);
+                if (appendHex(position, 4U, groupedAddress))
+                {
+                    std::size_t secondGroup = position + 4U;
+                    const std::size_t firstSeparator = secondGroup;
+                    while (secondGroup < t.size() &&
+                           std::isspace(static_cast<unsigned char>(t[secondGroup])))
+                    {
+                        ++secondGroup;
+                    }
+
+                    if (secondGroup > firstSeparator &&
+                        appendHex(secondGroup, 4U, groupedAddress))
+                    {
+                        std::size_t groupedValue = secondGroup + 4U;
+                        const std::size_t secondSeparator = groupedValue;
+                        while (groupedValue < t.size() &&
+                               std::isspace(static_cast<unsigned char>(t[groupedValue])))
+                        {
+                            ++groupedValue;
+                        }
+
+                        if (groupedValue > secondSeparator)
+                        {
+                            address = std::move(groupedAddress);
+                            valueStart = groupedValue;
+                        }
+                    }
+                }
+
+                if (valueStart == std::string_view::npos)
+                {
+                    address.clear();
+                    if (appendHex(position, 8U, address))
+                    {
+                        valueStart = position + 8U;
+                        while (valueStart < t.size() &&
+                               std::isspace(static_cast<unsigned char>(t[valueStart])))
+                        {
+                            ++valueStart;
+                        }
+                    }
+                }
+            }
+
+            if (valueStart != std::string_view::npos)
+            {
+                std::string value;
+                value.reserve(2U);
+                const std::size_t end = valueStart + 2U;
+                if (appendHex(valueStart, 2U, value) && validCodeEnd(end))
+                {
+                    normalized = "$" + address + " " + value;
+                    const std::string suffix = trim(std::string_view(t).substr(end));
+                    if (!suffix.empty())
+                        normalized += "\t" + suffix;
+                    return true;
+                }
+            }
+        }
+
+        std::string hex;
+        hex.reserve(12);
+        std::size_t end = position;
+
+        // Grouped display style: 1234-5678-9ABC.
+        if (position + 14U <= t.size() &&
+            t[position + 4U] == '-' && t[position + 9U] == '-')
+        {
+            std::string candidate;
+            candidate.reserve(12);
+            if (appendHex(position, 4U, candidate) &&
+                appendHex(position + 5U, 4U, candidate) &&
+                appendHex(position + 10U, 4U, candidate))
+            {
+                hex = std::move(candidate);
+                end = position + 14U;
+            }
+        }
+
+        // Space-grouped display style: 1234 5678 9ABC.
+        if (hex.empty())
+        {
+            std::string candidate;
+            candidate.reserve(12);
+            if (appendHex(position, 4U, candidate))
+            {
+                std::size_t secondGroup = position + 4U;
+                const std::size_t firstSeparator = secondGroup;
+                while (secondGroup < t.size() &&
+                       std::isspace(static_cast<unsigned char>(t[secondGroup])))
+                {
+                    ++secondGroup;
+                }
+
+                if (secondGroup > firstSeparator &&
+                    appendHex(secondGroup, 4U, candidate))
+                {
+                    std::size_t thirdGroup = secondGroup + 4U;
+                    const std::size_t secondSeparator = thirdGroup;
+                    while (thirdGroup < t.size() &&
+                           std::isspace(static_cast<unsigned char>(t[thirdGroup])))
+                    {
+                        ++thirdGroup;
+                    }
+
+                    if (thirdGroup > secondSeparator &&
+                        appendHex(thirdGroup, 4U, candidate))
+                    {
+                        hex = std::move(candidate);
+                        end = thirdGroup + 4U;
+                    }
+                }
+            }
+        }
+
+        // Compact 12-hex display style: 123456789ABC.
+        if (hex.empty())
+        {
+            std::string candidate;
+            candidate.reserve(12);
+            if (appendHex(position, 12U, candidate))
+            {
+                hex = std::move(candidate);
+                end = position + 12U;
+            }
+        }
+
+        // CMP display style: 12345678 9ABC.
+        if (hex.empty())
+        {
+            std::string candidate;
+            candidate.reserve(12);
+            if (appendHex(position, 8U, candidate))
+            {
+                std::size_t value = position + 8U;
+                const std::size_t separator = value;
+                while (value < t.size() && std::isspace(static_cast<unsigned char>(t[value])))
+                    ++value;
+
+                if (value > separator && appendHex(value, 4U, candidate))
+                {
+                    hex = std::move(candidate);
+                    end = value + 4U;
+                }
+            }
+        }
+
+        if (hex.size() != 12U)
+            return false;
+
+        if (!validCodeEnd(end))
+            return false;
+
+        normalized = "$" + hex.substr(0, 8) + " " + hex.substr(8, 4);
+        const std::string suffix = trim(std::string_view(t).substr(end));
+        if (!suffix.empty())
+            normalized += "\t" + suffix;
+        return true;
+    }
+
+    // Folder-drop cleanup performed before the normal decrypt pass. This does
+    // not define a new conversion format: it only normalizes textual code lines
+    // and author metadata into the converter's standard CMP-style input.
+    inline std::string normalizeBatchDecryptInput(const std::string& input)
+    {
+        const std::vector<std::string> lines = splitLines(input);
+        std::vector<std::string> output;
+        output.reserve(lines.size());
+
+        std::vector<std::string> pendingCredits;
+        bool inCodeRun = false;
+        std::size_t firstCodeIndex = 0;
+
+        for (const std::string& original : lines)
+        {
+            std::string metadata;
+            if (tryNormalizeBatchMetadataLine(original, metadata))
+            {
+                if (inCodeRun)
+                    inCodeRun = false;
+                output.push_back(metadata);
+                continue;
+            }
+
+            std::string credit;
+            std::string inlineTitle;
+            if (trySplitBatchInlineCreditLine(original, inlineTitle, credit))
+            {
+                if (inCodeRun)
+                    inCodeRun = false;
+
+                // Inline credits already identify their code-name line, so write
+                // the normalized credit immediately below that title. This also
+                // keeps joker templates such as `+D00981DA ????` from carrying
+                // the credit into the next normal code entry.
+                for (const std::string& pending : pendingCredits)
+                    output.push_back(pending);
+                pendingCredits.clear();
+                output.push_back(inlineTitle);
+                output.push_back(credit);
+                continue;
+            }
+
+            if (tryNormalizeBatchCreditLine(original, credit))
+            {
+                if (inCodeRun)
+                {
+                    output.insert(output.begin() + static_cast<std::ptrdiff_t>(firstCodeIndex), credit);
+                    ++firstCodeIndex;
+                }
+                else
+                {
+                    pendingCredits.push_back(credit);
+                }
+                continue;
+            }
+
+            std::string code;
+            if (tryNormalizeBatchCodeLine(original, code))
+            {
+                if (!inCodeRun)
+                {
+                    while (!output.empty() && trim(output.back()).empty())
+                        output.pop_back();
+
+                    for (const std::string& pending : pendingCredits)
+                        output.push_back(pending);
+                    pendingCredits.clear();
+
+                    firstCodeIndex = output.size();
+                    inCodeRun = true;
+                }
+
+                output.push_back(code);
+                continue;
+            }
+
+            if (inCodeRun)
+                inCodeRun = false;
+
+            output.push_back(original);
+        }
+
+        for (const std::string& pending : pendingCredits)
+            output.push_back(pending);
+
+        std::ostringstream joined;
+        for (std::size_t i = 0; i < output.size(); ++i)
+        {
+            if (i != 0)
+                joined << '\n';
+            joined << output[i];
+        }
+        return joined.str();
+    }
+
     inline std::string formatEncrypted(const xploder_psx::Code& code, bool grouped)
     {
-        return grouped ? xploder_psx::toGroupedEncryptedText(code) : xploder_psx::toCompactHex(code);
+        // Default CMP/Xploder display uses an 8-digit code word followed by
+        // the 4-digit value. The optional grouped form remains 4-4-4.
+        return grouped ? xploder_psx::toGroupedEncryptedText(code) : xploder_psx::toRawCmpText(code);
     }
 
     inline std::string hex4(int value)
@@ -113,6 +897,122 @@ namespace xploder_converter
             value >>= 4;
         }
         return s;
+    }
+
+    inline std::string hex8(std::uint32_t value)
+    {
+        static constexpr char lut[] = "0123456789ABCDEF";
+        std::string s(8, '0');
+        for (int i = 7; i >= 0; --i)
+        {
+            s[static_cast<std::size_t>(i)] = lut[value & 0xF];
+            value >>= 4;
+        }
+        return s;
+    }
+
+    inline std::uint32_t readBigEndian32(
+        const xploder_psx::Code& row,
+        std::size_t offset = 0U) noexcept
+    {
+        return
+            (static_cast<std::uint32_t>(row[offset]) << 24) |
+            (static_cast<std::uint32_t>(row[offset + 1U]) << 16) |
+            (static_cast<std::uint32_t>(row[offset + 2U]) << 8) |
+            static_cast<std::uint32_t>(row[offset + 3U]);
+    }
+
+    inline int readBigEndian16(
+        const xploder_psx::Code& row,
+        std::size_t offset) noexcept
+    {
+        return
+            (static_cast<int>(row[offset]) << 8) |
+            static_cast<int>(row[offset + 1U]);
+    }
+
+    inline std::string buildType6SourceRowComment(
+        const xploder_psx::MassWriteInfo& info,
+        int rowIndex,
+        const xploder_psx::Code& rawRow,
+        bool encryptedOutput = false)
+    {
+        std::ostringstream ss;
+        ss << "// ";
+        if (encryptedOutput)
+            ss << "encrypted row; RAW meaning: ";
+
+        if (rowIndex == 0)
+        {
+            ss << "Type 6 breakpoint descriptor"
+               << " | breakAddress=0x" << hex8(readBigEndian32(rawRow))
+               << " breakType=0x" << hex4(readBigEndian16(rawRow, 4U));
+            return ss.str();
+        }
+
+        const int sourceStart =
+            rowIndex * static_cast<int>(xploder_psx::CodeLength);
+        const int sourceBytesUsed = std::min(
+            static_cast<int>(xploder_psx::CodeLength),
+            std::max(0, info.sourcePayloadSize - sourceStart));
+        const int paddingBytes =
+            static_cast<int>(xploder_psx::CodeLength) - sourceBytesUsed;
+
+        int payloadStartForRow = -1;
+        int payloadBytesForRow = 0;
+
+        if (rowIndex == 1)
+        {
+            ss << "Type 6 breakpoint mask=0x"
+               << hex8(readBigEndian32(rawRow));
+
+            payloadStartForRow = 0;
+            payloadBytesForRow = std::min(2, info.payloadByteCount);
+            if (payloadBytesForRow > 0)
+            {
+                ss << " | payload bytes 0000-"
+                   << hex4(payloadBytesForRow - 1);
+            }
+        }
+        else
+        {
+            payloadStartForRow = sourceStart - 0x0A;
+            payloadBytesForRow = std::min(
+                static_cast<int>(xploder_psx::CodeLength),
+                std::max(0, info.payloadByteCount - payloadStartForRow));
+
+            if (payloadBytesForRow > 0)
+            {
+                ss << "Type 6 payload bytes "
+                   << hex4(payloadStartForRow) << '-'
+                   << hex4(payloadStartForRow + payloadBytesForRow - 1);
+            }
+            else
+            {
+                ss << "Type 6 padding row";
+            }
+        }
+
+        if (paddingBytes > 0)
+            ss << " | paddingBytes=" << paddingBytes;
+
+        const int leadingNibble = rawRow[0] >> 4;
+        if (leadingNibble == 9 && payloadBytesForRow == static_cast<int>(xploder_psx::CodeLength))
+        {
+            const std::uint32_t codeWord = readBigEndian32(rawRow);
+            const std::uint32_t compareAddress = codeWord & 0x0FFFFFFFU;
+            const int compareValue = readBigEndian16(rawRow, 4U);
+            ss << " | embedded Type 9 record inside Type 6 payload"
+               << " | compareAddress=0x" << hex8(compareAddress)
+               << " compareValue=0x" << hex4(compareValue);
+        }
+        else if (leadingNibble != 0)
+        {
+            ss << " | leading nibble " << std::uppercase << std::hex
+               << leadingNibble
+               << " is structured Type 6 data, not a standalone code type";
+        }
+        return ss.str();
     }
 
     inline bool isConfirmedMassWritePayloadKey(int payloadKey) noexcept
@@ -142,7 +1042,9 @@ namespace xploder_converter
             case 0x6: ss << "Type 6 special descriptor/bootstrap | addr=0x" << hex7(address) << " payloadBytes/value=0x" << hex4(value); break;
             case 0x7: ss << "16-bit equal conditional | if [0x" << hex7(address) << "] == 0x" << hex4(value); break;
             case 0x8: ss << "16-bit write | 8AAAAAAA VVVV | addr=0x" << hex7(address) << " value=0x" << hex4(value); break;
-            case 0x9: ss << "16-bit not-equal conditional | if [0x" << hex7(address) << "] != 0x" << hex4(value); break;
+            case 0x9: ss << "skip following cheat if 16-bit value is equal"
+                         << " | if [0x" << hex7(address) << "] == 0x"
+                         << hex4(value) << " then skip (otherwise execute)"; break;
             case 0xB: ss << "serial/repeater | BNNNIIII DDDD"; break;
             case 0xE: ss << "8-bit write to address+1 | EAAAAAAA 00VV | addr=0x" << hex7(address + 1) << " value=0x" << hex4(value & 0xFF); break;
             case 0xF: ss << "global equal gate | if [0x" << hex7(address) << "] == 0x" << hex4(value); break;
@@ -384,7 +1286,12 @@ namespace xploder_converter
         return true;
     }
 
-    inline bool tryPreserveActiveMassWriteBlock(const std::vector<std::string>& lines, std::size_t startIndex, const Options& options, std::string& preservedBlock, std::size_t& lastConsumedIndex)
+    inline bool tryPreserveRawMassWriteBlock(
+        const std::vector<std::string>& lines,
+        std::size_t startIndex,
+        const Options& options,
+        std::string& preservedBlock,
+        std::size_t& lastConsumedIndex)
     {
         preservedBlock.clear();
         lastConsumedIndex = startIndex;
@@ -397,559 +1304,114 @@ namespace xploder_converter
         if (!parseCodeBody(headerBody, Mode::Decrypt, header))
             return false;
 
-        // Active/runtime headers are already raw and use a normal Type 5/6
-        // first byte. Encrypted headers use one of the key routes instead.
         const int codeType = header[0] & 0xF0;
-
-        // This preservation rule is intentionally Type 5 only.
-        //
-        // A public Type 6 descriptor commonly decrypts to a raw-looking 60
-        // header with payload key 0. Treating every such header as already
-        // active breaks valid database codes such as:
-        //   $65A58ECFCED9 -> $60FCD000 000C
-        //
-        // The Xploder loader expands that Type 6 value by 0x12 and copies the
-        // following descriptor rows. Type 6 therefore needs to continue into
-        // tryConvertMassWriteBlock instead of being protected here.
-        if (codeType != 0x50 ||
+        if ((codeType != 0x50 && codeType != 0x60) ||
             (header[0] & 0x0F) != 0 ||
             xploder_psx::routeForCode(header) != xploder_psx::Route::Copy)
         {
             return false;
         }
 
-        // A raw public Type 5 header carrying a confirmed payload key must be
-        // converted. A raw Type 5 header with no confirmed key is treated as
-        // the already-active form and preserved byte-for-byte.
-        const int possiblePublicKey = header[4] >> 4;
-        if (isConfirmedMassWritePayloadKey(possiblePublicKey))
+        xploder_psx::MassWriteInfo info;
+        if (!xploder_psx::tryGetMassWriteInfoFromPublicHeader(header, info))
             return false;
 
-        const int payloadSize = (static_cast<int>(header[4]) << 8) | header[5];
-        if (payloadSize <= 0 || payloadSize > 0x10000)
-            return false;
-
-        const int payloadLineCount =
-            (payloadSize + static_cast<int>(xploder_psx::CodeLength) - 1) /
-            static_cast<int>(xploder_psx::CodeLength);
-
-        if (payloadLineCount <= 0 ||
-            startIndex + static_cast<std::size_t>(payloadLineCount) >= lines.size())
+        if (info.isType6)
         {
-            return false;
-        }
-
-        std::ostringstream out;
-        out << "$" << xploder_psx::toRawCmpText(header);
-        if (options.annotateCodeTypes)
-        {
-            out << "\t// already-active Type " << (codeType == 0x60 ? '6' : '5')
-                << " mass-write header | payloadBytes=0x" << hex4(payloadSize)
-                << " payloadLines=" << payloadLineCount;
-        }
-
-        for (int i = 0; i < payloadLineCount; ++i)
-        {
-            const std::size_t lineIndex = startIndex + 1U + static_cast<std::size_t>(i);
-            std::string payloadBody;
-            if (!tryGetCodeBody(lines[lineIndex], payloadBody))
+            // Key 6/7 Type 6 rows still need payload decryption. Only preserve
+            // copy-route RAW Type 6 blocks here.
+            if (isConfirmedMassWritePayloadKey(info.payloadKey))
                 return false;
-
-            xploder_psx::Code payload;
-            if (!parseCodeBody(payloadBody, Mode::Decrypt, payload))
-                return false;
-
-            // Keep active payload bytes exactly as supplied. They are binary
-            // data and must never be passed through normal line decryption.
-            out << "\n$" << xploder_psx::toRawCmpText(payload);
-            if (options.annotateCodeTypes)
-            {
-                const int firstByteOffset = i * static_cast<int>(xploder_psx::CodeLength);
-                const int bytesUsed = std::min(
-                    static_cast<int>(xploder_psx::CodeLength),
-                    std::max(0, payloadSize - firstByteOffset));
-                out << "\t// preserved active payload | bytes "
-                    << hex4(firstByteOffset) << "-"
-                    << hex4(firstByteOffset + bytesUsed - 1);
-                if (bytesUsed != static_cast<int>(xploder_psx::CodeLength))
-                {
-                    out << "; last "
-                        << (static_cast<int>(xploder_psx::CodeLength) - bytesUsed)
-                        << " byte(s) padding/ignored";
-                }
-            }
-        }
-
-        preservedBlock = out.str();
-        lastConsumedIndex = startIndex + static_cast<std::size_t>(payloadLineCount);
-        return true;
-    }
-
-
-    struct NestedType5ContinuationInfo
-    {
-        bool found = false;
-        bool inputHeaderWasActive = false;
-        int payloadKey = 0;
-        int basePayloadSize = 0;       // bytes supplied after the Type 6 block
-        int activePayloadSize = 0;     // basePayloadSize + 0x06
-        int payloadLineCount = 0;      // ceil(basePayloadSize / 6)
-        std::size_t embeddedHeaderLineIndex = 0;
-        xploder_psx::Code publicHeader{};
-        xploder_psx::Code activeHeader{};
-    };
-
-    inline bool tryFindNestedType5Continuation(
-        const std::vector<std::string>& lines,
-        std::size_t type6StartIndex,
-        const xploder_psx::MassWriteInfo& type6Info,
-        int selectedPayloadKey,
-        NestedType5ContinuationInfo& nestedInfo)
-    {
-        nestedInfo = {};
-
-        // Confirmed nested layout:
-        //
-        //   Type 6 active size = 0x12-byte descriptor + public Type 6 base size.
-        //
-        // The final complete six-byte row inside that Type 6 payload may be an
-        // encrypted Type 5 header. When this happens, the Type 5 header itself
-        // supplies the extra +0x06 bytes represented by its active size. Only
-        // the Type 5 base-size bytes follow outside the Type 6 block.
-        //
-        // Example:
-        //   $65A58ECFCED9 -> public Type 6 $60FCD000 000C
-        //                    active Type 6 $60FCD000 001E
-        //
-        //   0x12 descriptor bytes
-        //   $90007612 AC08
-        //   $55A934DF 2E7D  (embedded encrypted Type 5 header)
-        //   followed by 0xB0 bytes / 30 encrypted Type 5 payload rows.
-        //
-        // This behavior is only confirmed for the Type 6 copy route (key 0).
-        if (!type6Info.isType6 || type6Info.payloadKey != 0)
-            return false;
-
-        constexpr int Type6DescriptorSize = 0x12;
-        if (type6Info.payloadSize <= Type6DescriptorSize)
-            return false;
-
-        const int publicType6BaseSize = type6Info.payloadSize - Type6DescriptorSize;
-        if (publicType6BaseSize < static_cast<int>(xploder_psx::CodeLength))
-            return false;
-
-        // The embedded Type 5 header must be the final complete six-byte row of
-        // the Type 6 payload. If the Type 6 base data ends in a partial row, do
-        // not guess that padding is another header.
-        if ((publicType6BaseSize % static_cast<int>(xploder_psx::CodeLength)) != 0)
-            return false;
-
-        const int embeddedRowCount =
-            publicType6BaseSize / static_cast<int>(xploder_psx::CodeLength);
-        const int embeddedHeaderPayloadRow =
-            (Type6DescriptorSize / static_cast<int>(xploder_psx::CodeLength)) +
-            embeddedRowCount - 1;
-
-        if (embeddedHeaderPayloadRow < 0 ||
-            embeddedHeaderPayloadRow >= type6Info.payloadLineCount)
-        {
-            return false;
-        }
-
-        const std::size_t embeddedHeaderLineIndex =
-            type6StartIndex + 1U +
-            static_cast<std::size_t>(embeddedHeaderPayloadRow);
-
-        if (embeddedHeaderLineIndex >= lines.size())
-            return false;
-
-        std::string embeddedBody;
-        if (!tryGetCodeBody(lines[embeddedHeaderLineIndex], embeddedBody))
-            return false;
-
-        xploder_psx::Code embeddedHeader;
-        if (!parseCodeBody(embeddedBody, Mode::Decrypt, embeddedHeader))
-            return false;
-
-        xploder_psx::Code publicNestedHeader{};
-        xploder_psx::Code activeNestedHeader{};
-        int payloadKey = 0;
-        int basePayloadSize = 0;
-        bool inputHeaderWasActive = false;
-
-        // First try the real encrypted nested-header form. This is the form
-        // stored inside the original Type 6 payload, for example:
-        //
-        //   $55A934DF 2E7D -> $50007610 60B0
-        //
-        // If that does not apply, accept the normalized active form emitted by
-        // this converter:
-        //
-        //   $50007610 00B6
-        //
-        // The active form no longer stores the payload key, so encryption uses
-        // the current Type 5 Payload Key selection from the GUI.
-        xploder_psx::Code decryptedCandidate = embeddedHeader;
-        const bool decryptedAsNormalLine =
-            xploder_psx::decryptCode(decryptedCandidate);
-
-        if (decryptedAsNormalLine &&
-            (decryptedCandidate[0] & 0xF0) == 0x50)
-        {
-            const int detectedPayloadKey =
-                decryptedCandidate[4] >> 4;
-
-            if (!isConfirmedMassWritePayloadKey(
-                    detectedPayloadKey))
-            {
-                return false;
-            }
-
-            payloadKey = detectedPayloadKey;
-            basePayloadSize =
-                ((static_cast<int>(decryptedCandidate[4]) & 0x0F) << 8) |
-                decryptedCandidate[5];
-            publicNestedHeader = decryptedCandidate;
-        }
-        else if ((embeddedHeader[0] & 0xF0) == 0x50)
-        {
-            if (!isConfirmedMassWritePayloadKey(
-                    selectedPayloadKey))
-            {
-                return false;
-            }
-
-            const int encodedValue =
-                (static_cast<int>(embeddedHeader[4]) << 8) |
-                embeddedHeader[5];
-
-            // Also accept a raw public Type 5 header for compatibility. A raw
-            // public header keeps its payload key in the high nibble.
-            const int possiblePublicKey =
-                embeddedHeader[4] >> 4;
-            const int possiblePublicSize =
-                ((static_cast<int>(embeddedHeader[4]) & 0x0F) << 8) |
-                embeddedHeader[5];
-
-            if (isConfirmedMassWritePayloadKey(
-                    possiblePublicKey) &&
-                possiblePublicSize > 0 &&
-                possiblePublicSize <= 0x0FFF)
-            {
-                payloadKey = possiblePublicKey;
-                basePayloadSize = possiblePublicSize;
-                publicNestedHeader = embeddedHeader;
-            }
-            else
-            {
-                if (encodedValue <= 0x06)
-                    return false;
-
-                payloadKey = selectedPayloadKey;
-                basePayloadSize = encodedValue - 0x06;
-                publicNestedHeader = embeddedHeader;
-                publicNestedHeader[4] = xploder_psx::byte(
-                    ((payloadKey & 0x0F) << 4) |
-                    ((basePayloadSize >> 8) & 0x0F));
-                publicNestedHeader[5] = xploder_psx::byte(
-                    basePayloadSize);
-                inputHeaderWasActive = true;
-            }
         }
         else
         {
-            return false;
-        }
-
-        if (basePayloadSize <= 0 || basePayloadSize > 0x0FFF)
-            return false;
-
-        const int activePayloadSize = basePayloadSize + 0x06;
-        activeNestedHeader = publicNestedHeader;
-        activeNestedHeader[4] = xploder_psx::byte(
-            activePayloadSize >> 8);
-        activeNestedHeader[5] = xploder_psx::byte(
-            activePayloadSize);
-
-        const int payloadLineCount =
-            (basePayloadSize + static_cast<int>(xploder_psx::CodeLength) - 1) /
-            static_cast<int>(xploder_psx::CodeLength);
-
-        const std::size_t firstContinuationLine =
-            type6StartIndex + 1U +
-            static_cast<std::size_t>(type6Info.payloadLineCount);
-
-        if (payloadLineCount <= 0 ||
-            firstContinuationLine + static_cast<std::size_t>(payloadLineCount) >
-                lines.size())
-        {
-            return false;
-        }
-
-        // Require every expected continuation row to be a complete code line.
-        // This prevents coincidental Type 5-looking bytes inside descriptor
-        // data from swallowing following names, comments, or unrelated codes.
-        for (int i = 0; i < payloadLineCount; ++i)
-        {
-            std::string payloadBody;
-            if (!tryGetCodeBody(
-                    lines[firstContinuationLine + static_cast<std::size_t>(i)],
-                    payloadBody))
-            {
-                return false;
-            }
-
-            xploder_psx::Code payload;
-            if (!parseCodeBody(payloadBody, Mode::Decrypt, payload))
+            // Canonical external RAW Type 5 headers are keyless. A high-nibble
+            // key means this is a public header that still needs conversion.
+            if (info.payloadKey != 0)
                 return false;
         }
 
-        nestedInfo.found = true;
-        nestedInfo.inputHeaderWasActive = inputHeaderWasActive;
-        nestedInfo.payloadKey = payloadKey;
-        nestedInfo.basePayloadSize = basePayloadSize;
-        nestedInfo.activePayloadSize = activePayloadSize;
-        nestedInfo.payloadLineCount = payloadLineCount;
-        nestedInfo.embeddedHeaderLineIndex = embeddedHeaderLineIndex;
-        nestedInfo.publicHeader = publicNestedHeader;
-        nestedInfo.activeHeader = activeNestedHeader;
-        return true;
-    }
-
-    inline bool tryConvertMassWriteBlock(const std::vector<std::string>& lines, std::size_t startIndex, const Options& options, std::string& convertedBlock, std::size_t& lastConsumedIndex)
-    {
-        convertedBlock.clear();
-        lastConsumedIndex = startIndex;
-
-        std::string headerBody;
-        if (!tryGetCodeBody(lines[startIndex], headerBody))
-            return false;
-
-        xploder_psx::Code header;
-        if (!parseCodeBody(headerBody, Mode::Decrypt, header))
-            return false;
-
-        xploder_psx::MassWriteInfo info;
-        if (!xploder_psx::decryptMassWriteHeaderToActive(header, info))
-            return false;
-
-        // Type 5 payload encryption is confirmed for keys 6 and 7 only.
-        // A raw active Type 5 header such as $50007800 0050 has no public
-        // payload key encoded in its value and must not be reinterpreted.
-        //
-        // Type 6 is different. The loader accepts the low nibble of byte 3 as
-        // its descriptor payload route. Keys 6 and 7 use the forced payload
-        // transforms; every other Type 6 key follows the loader copy route.
-        // Key 0 is common and is valid pass-through descriptor data.
-        if (!info.isType6 && !isConfirmedMassWritePayloadKey(info.payloadKey))
-            return false;
-
-        // Keep sane bounds so normal accidental $50/$60 lines do not swallow
-        // the whole file.
-        if (info.payloadSize <= 0 ||
-            info.payloadSize > 0x10000 ||
-            info.payloadLineCount <= 0)
+        if (info.payloadLineCount <= 0 ||
+            startIndex + static_cast<std::size_t>(info.payloadLineCount) >= lines.size())
         {
             return false;
         }
 
-        if (startIndex + static_cast<std::size_t>(info.payloadLineCount) >=
-            lines.size())
+        std::vector<xploder_psx::Code> rows;
+        rows.reserve(static_cast<std::size_t>(info.payloadLineCount));
+        for (int i = 0; i < info.payloadLineCount; ++i)
         {
-            return false;
-        }
+            const std::size_t lineIndex =
+                startIndex + 1U + static_cast<std::size_t>(i);
+            std::string body;
+            if (!tryGetCodeBody(lines[lineIndex], body))
+                return false;
 
-        // Check the original Type 6 payload before converting it. The final
-        // embedded row may be an encrypted Type 5 header whose payload follows
-        // immediately after the Type 6 block.
-        NestedType5ContinuationInfo nestedType5;
-        if (info.isType6)
-        {
-            (void)tryFindNestedType5Continuation(
-                lines,
-                startIndex,
-                info,
-                options.massWritePayloadKey,
-                nestedType5);
+            xploder_psx::Code row;
+            if (!parseCodeBody(body, Mode::Decrypt, row))
+                return false;
+            rows.push_back(row);
         }
 
         std::ostringstream out;
-        out << "$" << xploder_psx::toRawCmpText(header);
+        out << '$' << xploder_psx::toRawCmpText(header);
         if (options.annotateCodeTypes)
         {
-            out << "\t// Type " << (info.isType6 ? '6' : '5')
-                << " mass-write header | payloadKey=" << info.payloadKey
-                << " activeBytes=0x" << hex4(info.payloadSize)
-                << " sourceBytes=0x" << hex4(info.sourcePayloadSize)
-                << " payloadLines=" << info.payloadLineCount;
-
-            if (nestedType5.found)
+            if (info.isType6)
             {
-                out << " | nested Type 5 continuation: key="
-                    << nestedType5.payloadKey
-                    << " baseBytes=0x"
-                    << hex4(nestedType5.basePayloadSize)
-                    << " rows="
-                    << nestedType5.payloadLineCount;
+                out << "\t// already-RAW Type 6 header"
+                    << " | continuationBytes=0x" << hex4(info.payloadSize)
+                    << " payloadBytes=0x" << hex4(info.payloadByteCount)
+                    << " descriptorBytes=0x000A"
+                    << " sourceRows=" << info.payloadLineCount;
+            }
+            else
+            {
+                out << "\t// already-RAW Type 5 header"
+                    << " | payloadBytes=0x" << hex4(info.payloadByteCount)
+                    << " sourceRows=" << info.payloadLineCount;
             }
         }
 
         for (int i = 0; i < info.payloadLineCount; ++i)
         {
-            const std::size_t lineIndex =
-                startIndex + 1U + static_cast<std::size_t>(i);
+            const xploder_psx::Code& row =
+                rows[static_cast<std::size_t>(i)];
+            out << "\n$" << xploder_psx::toRawCmpText(row);
 
-            std::string payloadBody;
-            if (!tryGetCodeBody(lines[lineIndex], payloadBody))
-                return false;
-
-            xploder_psx::Code payload;
-            if (!parseCodeBody(payloadBody, Mode::Decrypt, payload))
-                return false;
-
-            if (isConfirmedMassWritePayloadKey(info.payloadKey))
-            {
-                if (!xploder_psx::decryptPayloadChunk(
-                        payload,
-                        info.payloadKey))
-                {
-                    return false;
-                }
-            }
-            else if (!info.isType6)
-            {
-                return false;
-            }
-            // For Type 6 keys other than 6/7, the real loader uses the copy
-            // route. Keep descriptor rows byte-for-byte. When the final row is
-            // a confirmed nested Type 5 header, normalize it into active form.
-            const bool isNestedHeaderRow =
-                nestedType5.found &&
-                lineIndex == nestedType5.embeddedHeaderLineIndex;
-
-            if (isNestedHeaderRow)
-            {
-                payload = nestedType5.activeHeader;
-            }
-
-            out << "\n$" << xploder_psx::toRawCmpText(payload);
             if (options.annotateCodeTypes)
             {
-                const int firstByteOffset =
-                    i * static_cast<int>(xploder_psx::CodeLength);
-                const int bytesUsed = std::min(
-                    static_cast<int>(xploder_psx::CodeLength),
-                    std::max(0, info.sourcePayloadSize - firstByteOffset));
-
-                out << "\t// Type "
-                    << (info.isType6 ? '6' : '5')
-                    << " payload data | bytes "
-                    << hex4(firstByteOffset)
-                    << "-"
-                    << hex4(firstByteOffset + bytesUsed - 1);
-
-                if (bytesUsed !=
-                    static_cast<int>(xploder_psx::CodeLength))
+                if (info.isType6)
                 {
-                    out << "; last "
-                        << (static_cast<int>(xploder_psx::CodeLength) -
-                            bytesUsed)
-                        << " byte(s) padding/ignored";
+                    out << "\t"
+                        << buildType6SourceRowComment(info, i, row);
                 }
-
-                if (isNestedHeaderRow)
-                {
-                    out << " | normalized nested Type 5 active header"
-                        << " | public="
-                        << xploder_psx::toRawCmpText(
-                               nestedType5.publicHeader)
-                        << " | key="
-                        << nestedType5.payloadKey;
-                }
-            }
-        }
-
-        std::size_t consumedIndex =
-            startIndex + static_cast<std::size_t>(info.payloadLineCount);
-
-        if (nestedType5.found)
-        {
-            const std::size_t firstContinuationLine =
-                consumedIndex + 1U;
-
-            for (int i = 0;
-                 i < nestedType5.payloadLineCount;
-                 ++i)
-            {
-                const std::size_t lineIndex =
-                    firstContinuationLine +
-                    static_cast<std::size_t>(i);
-
-                std::string payloadBody;
-                if (!tryGetCodeBody(lines[lineIndex], payloadBody))
-                    return false;
-
-                xploder_psx::Code payload;
-                if (!parseCodeBody(
-                        payloadBody,
-                        Mode::Decrypt,
-                        payload))
-                {
-                    return false;
-                }
-
-                if (!xploder_psx::decryptPayloadChunk(
-                        payload,
-                        nestedType5.payloadKey))
-                {
-                    return false;
-                }
-
-                out << "\n$"
-                    << xploder_psx::toRawCmpText(payload);
-
-                if (options.annotateCodeTypes)
+                else
                 {
                     const int firstByteOffset =
-                        i * static_cast<int>(
-                                xploder_psx::CodeLength);
+                        i * static_cast<int>(xploder_psx::CodeLength);
                     const int bytesUsed = std::min(
-                        static_cast<int>(
-                            xploder_psx::CodeLength),
-                        std::max(
-                            0,
-                            nestedType5.basePayloadSize -
-                                firstByteOffset));
-
-                    out << "\t// nested Type 5 payload data | bytes "
-                        << hex4(firstByteOffset)
-                        << "-"
+                        static_cast<int>(xploder_psx::CodeLength),
+                        std::max(0, info.sourcePayloadSize - firstByteOffset));
+                    out << "\t// preserved Type 5 payload bytes "
+                        << hex4(firstByteOffset) << '-'
                         << hex4(firstByteOffset + bytesUsed - 1);
-
-                    if (bytesUsed !=
-                        static_cast<int>(
-                            xploder_psx::CodeLength))
-                    {
-                        out << "; last "
-                            << (static_cast<int>(
-                                    xploder_psx::CodeLength) -
-                                bytesUsed)
-                            << " byte(s) padding/ignored";
-                    }
                 }
             }
-
-            consumedIndex +=
-                static_cast<std::size_t>(
-                    nestedType5.payloadLineCount);
         }
 
-        convertedBlock = out.str();
-        lastConsumedIndex = consumedIndex;
+        preservedBlock = out.str();
+        lastConsumedIndex =
+            startIndex + static_cast<std::size_t>(info.payloadLineCount);
         return true;
     }
 
-    inline bool tryEncryptMassWriteBlock(const std::vector<std::string>& lines, std::size_t startIndex, const Options& options, std::string& convertedBlock, std::size_t& lastConsumedIndex)
+    inline bool tryConvertMassWriteBlock(
+        const std::vector<std::string>& lines,
+        std::size_t startIndex,
+        const Options& options,
+        std::string& convertedBlock,
+        std::size_t& lastConsumedIndex)
     {
         convertedBlock.clear();
         lastConsumedIndex = startIndex;
@@ -958,42 +1420,153 @@ namespace xploder_converter
         if (!tryGetCodeBody(lines[startIndex], headerBody))
             return false;
 
-        xploder_psx::Code activeHeader;
-        if (!parseCodeBody(headerBody, Mode::Encrypt, activeHeader))
+        xploder_psx::Code rawHeader;
+        if (!parseCodeBody(headerBody, Mode::Decrypt, rawHeader))
             return false;
 
-        const int codeType = activeHeader[0] & 0xF0;
-        if (codeType != 0x50 && codeType != 0x60)
+        xploder_psx::MassWriteInfo info;
+        if (!xploder_psx::decryptMassWriteHeaderToActive(rawHeader, info))
             return false;
 
-        const bool isType6 = codeType == 0x60;
-        const int payloadSize =
-            (static_cast<int>(activeHeader[4]) << 8) |
-            activeHeader[5];
-
-        if (payloadSize <= 0 || payloadSize > 0x10000)
-            return false;
-
-        const int sourcePayloadSize =
-            isType6 ? payloadSize : payloadSize - 0x06;
-        const int payloadLineCount =
-            (sourcePayloadSize + static_cast<int>(xploder_psx::CodeLength) - 1) /
-            static_cast<int>(xploder_psx::CodeLength);
-
-        if (sourcePayloadSize <= 0 || payloadLineCount <= 0 ||
-            startIndex + static_cast<std::size_t>(payloadLineCount) >=
-                lines.size())
+        if (!info.isType6 &&
+            !isConfirmedMassWritePayloadKey(info.payloadKey))
         {
             return false;
         }
 
-        // Type 5 active headers no longer contain the original payload key, so
-        // use the selected key. Type 6 keeps its payload/copy route in the low
-        // nibble of byte 3; preserve that route during round-trip encryption.
+        if (info.sourcePayloadSize <= 0 || info.payloadLineCount <= 0 ||
+            startIndex + static_cast<std::size_t>(info.payloadLineCount) >= lines.size())
+        {
+            return false;
+        }
+
+        std::vector<xploder_psx::Code> rows;
+        rows.reserve(static_cast<std::size_t>(info.payloadLineCount));
+        for (int i = 0; i < info.payloadLineCount; ++i)
+        {
+            const std::size_t lineIndex =
+                startIndex + 1U + static_cast<std::size_t>(i);
+            std::string body;
+            if (!tryGetCodeBody(lines[lineIndex], body))
+                return false;
+
+            xploder_psx::Code row;
+            if (!parseCodeBody(body, Mode::Decrypt, row))
+                return false;
+            rows.push_back(row);
+        }
+
+        std::ostringstream out;
+        out << '$' << xploder_psx::toRawCmpText(rawHeader);
+        if (options.annotateCodeTypes)
+        {
+            if (info.isType6)
+            {
+                out << "\t// Type 6 external RAW header"
+                    << " | payloadKey=" << info.payloadKey
+                    << " continuationBytes=0x" << hex4(info.payloadSize)
+                    << " payloadBytes=0x" << hex4(info.payloadByteCount)
+                    << " descriptorBytes=0x000A"
+                    << " sourceRows=" << info.payloadLineCount;
+            }
+            else
+            {
+                out << "\t// Type 5 external RAW header"
+                    << " | payloadKey=" << info.payloadKey
+                    << " payloadBytes=0x" << hex4(info.payloadByteCount)
+                    << " sourceRows=" << info.payloadLineCount;
+            }
+        }
+
+        for (int i = 0; i < info.payloadLineCount; ++i)
+        {
+            xploder_psx::Code payload =
+                rows[static_cast<std::size_t>(i)];
+
+            if (isConfirmedMassWritePayloadKey(info.payloadKey))
+            {
+                if (!xploder_psx::decryptPayloadChunk(
+                        payload, info.payloadKey))
+                {
+                    return false;
+                }
+
+                if (!info.isType6)
+                    xploder_psx::swapType5PayloadByteOrder(payload);
+            }
+            else if (!info.isType6)
+            {
+                return false;
+            }
+            // Type 6 routes other than 6/7 are copy routes.
+
+            out << "\n$" << xploder_psx::toRawCmpText(payload);
+            if (options.annotateCodeTypes)
+            {
+                if (info.isType6)
+                {
+                    out << "\t"
+                        << buildType6SourceRowComment(info, i, payload);
+                }
+                else
+                {
+                    const int firstByteOffset =
+                        i * static_cast<int>(xploder_psx::CodeLength);
+                    const int bytesUsed = std::min(
+                        static_cast<int>(xploder_psx::CodeLength),
+                        std::max(0, info.sourcePayloadSize - firstByteOffset));
+                    out << "\t// Type 5 payload bytes "
+                        << hex4(firstByteOffset) << '-'
+                        << hex4(firstByteOffset + bytesUsed - 1);
+                }
+            }
+        }
+
+        convertedBlock = out.str();
+        lastConsumedIndex =
+            startIndex + static_cast<std::size_t>(info.payloadLineCount);
+        return true;
+    }
+
+    inline bool tryEncryptMassWriteBlock(
+        const std::vector<std::string>& lines,
+        std::size_t startIndex,
+        const Options& options,
+        std::string& convertedBlock,
+        std::size_t& lastConsumedIndex)
+    {
+        convertedBlock.clear();
+        lastConsumedIndex = startIndex;
+
+        std::string headerBody;
+        if (!tryGetCodeBody(lines[startIndex], headerBody))
+            return false;
+
+        xploder_psx::Code rawHeader;
+        if (!parseCodeBody(headerBody, Mode::Encrypt, rawHeader))
+            return false;
+
+        const int codeType = rawHeader[0] & 0xF0;
+        if (codeType != 0x50 && codeType != 0x60)
+            return false;
+
+        const bool isType6 = (codeType == 0x60);
+        xploder_psx::MassWriteInfo rawInfo;
+        if (!xploder_psx::tryGetMassWriteInfoFromPublicHeader(rawHeader, rawInfo))
+            return false;
+
+        const int baseSize = rawInfo.payloadSize;
+        const int sourcePayloadSize = rawInfo.sourcePayloadSize;
+        const int payloadLineCount = rawInfo.payloadLineCount;
+
+        if (sourcePayloadSize <= 0 || payloadLineCount <= 0 ||
+            startIndex + static_cast<std::size_t>(payloadLineCount) >= lines.size())
+        {
+            return false;
+        }
+
         const int effectivePayloadKey =
-            isType6
-                ? (activeHeader[3] & 0x0F)
-                : options.massWritePayloadKey;
+            isType6 ? (rawHeader[3] & 0x0F) : options.massWritePayloadKey;
 
         if (!isType6 &&
             !isConfirmedMassWritePayloadKey(effectivePayloadKey))
@@ -1001,144 +1574,69 @@ namespace xploder_converter
             return false;
         }
 
-        std::vector<xploder_psx::Code> payloadRows;
-        payloadRows.reserve(
-            static_cast<std::size_t>(payloadLineCount));
-
+        std::vector<xploder_psx::Code> rows;
+        rows.reserve(static_cast<std::size_t>(payloadLineCount));
         for (int i = 0; i < payloadLineCount; ++i)
         {
             const std::size_t lineIndex =
                 startIndex + 1U + static_cast<std::size_t>(i);
-
-            xploder_psx::Code payload;
+            xploder_psx::Code row;
             int byteCount = 0;
-            if (!parsePayloadLineBytes(
-                    lines[lineIndex],
-                    payload,
-                    byteCount))
+            if (!parsePayloadLineBytes(lines[lineIndex], row, byteCount) ||
+                byteCount == 0)
             {
                 return false;
             }
-
-            if (byteCount == 0)
-                return false;
-
-            payloadRows.push_back(payload);
+            rows.push_back(row);
         }
 
-        xploder_psx::MassWriteInfo activeInfo;
-        activeInfo.payloadKey = effectivePayloadKey;
-        activeInfo.payloadSize = payloadSize;
-        activeInfo.sourcePayloadSize = sourcePayloadSize;
-        activeInfo.payloadLineCount = payloadLineCount;
-        activeInfo.isType6 = isType6;
-
-        NestedType5ContinuationInfo nestedType5;
-        if (isType6)
-        {
-            (void)tryFindNestedType5Continuation(
-                lines,
-                startIndex,
-                activeInfo,
-                options.massWritePayloadKey,
-                nestedType5);
-        }
-
-        xploder_psx::Code encryptedHeader = activeHeader;
-        xploder_psx::MassWriteInfo publicInfo;
+        xploder_psx::Code encryptedHeader = rawHeader;
+        xploder_psx::MassWriteInfo info;
         if (!xploder_psx::encryptMassWriteHeaderFromActive(
                 encryptedHeader,
                 options.encryptionKey,
                 effectivePayloadKey,
-                &publicInfo))
+                &info))
         {
             return false;
         }
 
         std::ostringstream out;
-        out << "$"
-            << formatEncrypted(
-                   encryptedHeader,
-                   options.groupEncryptedOutput);
-
+        out << '$' << formatEncrypted(
+            encryptedHeader, options.groupEncryptedOutput);
         if (options.annotateCodeTypes)
         {
-            xploder_psx::Code publicHeader = activeHeader;
-            const int adjust = isType6 ? 0x12 : 0x06;
-            const int baseSize = payloadSize - adjust;
-
             if (isType6)
             {
-                publicHeader[3] = xploder_psx::byte(
-                    (publicHeader[3] & 0xF0) |
-                    (effectivePayloadKey & 0x0F));
-                publicHeader[4] = xploder_psx::byte(
-                    baseSize >> 8);
-                publicHeader[5] = xploder_psx::byte(
-                    baseSize);
+                out << "\t// Type 6 encrypted header"
+                    << " | payloadKey=" << effectivePayloadKey
+                    << " continuationBytes=0x" << hex4(baseSize)
+                    << " payloadBytes=0x" << hex4(rawInfo.payloadByteCount)
+                    << " descriptorBytes=0x000A"
+                    << " sourceRows=" << payloadLineCount;
             }
             else
             {
-                publicHeader[4] = xploder_psx::byte(
-                    ((effectivePayloadKey & 0x0F) << 4) |
-                    ((baseSize >> 8) & 0x0F));
-                publicHeader[5] = xploder_psx::byte(
-                    baseSize);
-            }
-
-            out << "\t// Type "
-                << (isType6 ? '6' : '5')
-                << " mass-write encrypted header | payloadKey="
-                << effectivePayloadKey
-                << " payloadBytes=0x"
-                << hex4(payloadSize)
-                << " publicValue="
-                << xploder_psx::toCompactHex(publicHeader)
-                       .substr(8, 4);
-
-            if (nestedType5.found)
-            {
-                out << " | nested Type 5 continuation: key="
-                    << nestedType5.payloadKey
-                    << " baseBytes=0x"
-                    << hex4(nestedType5.basePayloadSize)
-                    << " rows="
-                    << nestedType5.payloadLineCount;
+                out << "\t// Type 5 encrypted header"
+                    << " | payloadKey=" << effectivePayloadKey
+                    << " payloadBytes=0x" << hex4(rawInfo.payloadByteCount)
+                    << " sourceRows=" << payloadLineCount;
             }
         }
 
         for (int i = 0; i < payloadLineCount; ++i)
         {
-            xploder_psx::Code payload =
-                payloadRows[static_cast<std::size_t>(i)];
+            const xploder_psx::Code rawPayload =
+                rows[static_cast<std::size_t>(i)];
+            xploder_psx::Code payload = rawPayload;
 
-            const std::size_t lineIndex =
-                startIndex + 1U +
-                static_cast<std::size_t>(i);
-            const bool isNestedHeaderRow =
-                nestedType5.found &&
-                lineIndex == nestedType5.embeddedHeaderLineIndex;
+            if (isConfirmedMassWritePayloadKey(effectivePayloadKey))
+            {
+                if (!isType6)
+                    xploder_psx::swapType5PayloadByteOrder(payload);
 
-            if (isNestedHeaderRow)
-            {
-                // The normalized input contains an active nested Type 5 header
-                // such as $50007610 00B6. Rebuild its public value using the
-                // current Type 5 Payload Key selection, then encrypt the header
-                // with the normal line key.
-                payload = nestedType5.publicHeader;
-                if (!xploder_psx::encryptCode(
-                        payload,
-                        options.encryptionKey))
-                {
-                    return false;
-                }
-            }
-            else if (isConfirmedMassWritePayloadKey(
-                         effectivePayloadKey))
-            {
                 if (!xploder_psx::encryptPayloadChunk(
-                        payload,
-                        effectivePayloadKey))
+                        payload, effectivePayloadKey))
                 {
                     return false;
                 }
@@ -1147,137 +1645,34 @@ namespace xploder_converter
             {
                 return false;
             }
-            // Type 6 routes other than 6/7 are loader copy routes. Descriptor
-            // rows are preserved, while a normalized nested Type 5 header is
-            // rebuilt above.
+            // Type 6 routes other than 6/7 are copied unchanged.
 
-            out << "\n$"
-                << formatEncrypted(
-                       payload,
-                       options.groupEncryptedOutput);
-
+            out << "\n$" << formatEncrypted(
+                payload, options.groupEncryptedOutput);
             if (options.annotateCodeTypes)
             {
-                const int firstByteOffset =
-                    i * static_cast<int>(
-                            xploder_psx::CodeLength);
-                const int bytesUsed = std::min(
-                    static_cast<int>(
-                        xploder_psx::CodeLength),
-                    std::max(
-                        0,
-                        sourcePayloadSize - firstByteOffset));
-
-                out << "\t// Type "
-                    << (isType6 ? '6' : '5')
-                    << " encrypted payload | bytes "
-                    << hex4(firstByteOffset)
-                    << "-"
-                    << hex4(firstByteOffset + bytesUsed - 1);
-
-                if (bytesUsed !=
-                    static_cast<int>(
-                        xploder_psx::CodeLength))
+                if (isType6)
                 {
-                    out << "; last "
-                        << (static_cast<int>(
-                                xploder_psx::CodeLength) -
-                            bytesUsed)
-                        << " byte(s) padding/ignored";
+                    out << "\t" << buildType6SourceRowComment(
+                        rawInfo, i, rawPayload, true);
                 }
-
-                if (isNestedHeaderRow)
-                {
-                    out << " | rebuilt nested Type 5 encrypted header"
-                        << " | key="
-                        << nestedType5.payloadKey
-                        << " | public="
-                        << xploder_psx::toRawCmpText(
-                               nestedType5.publicHeader);
-                }
-            }
-        }
-
-        std::size_t consumedIndex =
-            startIndex +
-            static_cast<std::size_t>(payloadLineCount);
-
-        if (nestedType5.found)
-        {
-            const std::size_t firstContinuationLine =
-                consumedIndex + 1U;
-
-            for (int i = 0;
-                 i < nestedType5.payloadLineCount;
-                 ++i)
-            {
-                const std::size_t lineIndex =
-                    firstContinuationLine +
-                    static_cast<std::size_t>(i);
-
-                xploder_psx::Code payload;
-                int byteCount = 0;
-                if (!parsePayloadLineBytes(
-                        lines[lineIndex],
-                        payload,
-                        byteCount))
-                {
-                    return false;
-                }
-
-                if (byteCount == 0)
-                    return false;
-
-                if (!xploder_psx::encryptPayloadChunk(
-                        payload,
-                        nestedType5.payloadKey))
-                {
-                    return false;
-                }
-
-                out << "\n$"
-                    << formatEncrypted(
-                           payload,
-                           options.groupEncryptedOutput);
-
-                if (options.annotateCodeTypes)
+                else
                 {
                     const int firstByteOffset =
-                        i * static_cast<int>(
-                                xploder_psx::CodeLength);
+                        i * static_cast<int>(xploder_psx::CodeLength);
                     const int bytesUsed = std::min(
-                        static_cast<int>(
-                            xploder_psx::CodeLength),
-                        std::max(
-                            0,
-                            nestedType5.basePayloadSize -
-                                firstByteOffset));
-
-                    out << "\t// nested Type 5 encrypted payload | bytes "
-                        << hex4(firstByteOffset)
-                        << "-"
+                        static_cast<int>(xploder_psx::CodeLength),
+                        std::max(0, sourcePayloadSize - firstByteOffset));
+                    out << "\t// encrypted Type 5 payload bytes "
+                        << hex4(firstByteOffset) << '-'
                         << hex4(firstByteOffset + bytesUsed - 1);
-
-                    if (bytesUsed !=
-                        static_cast<int>(
-                            xploder_psx::CodeLength))
-                    {
-                        out << "; last "
-                            << (static_cast<int>(
-                                    xploder_psx::CodeLength) -
-                                bytesUsed)
-                            << " byte(s) padding/ignored";
-                    }
                 }
             }
-
-            consumedIndex +=
-                static_cast<std::size_t>(
-                    nestedType5.payloadLineCount);
         }
 
         convertedBlock = out.str();
-        lastConsumedIndex = consumedIndex;
+        lastConsumedIndex =
+            startIndex + static_cast<std::size_t>(payloadLineCount);
         return true;
     }
 
@@ -1290,6 +1685,19 @@ namespace xploder_converter
 
         if (startsWith(t, "!!") || t[0] == '!' || t[0] == '%' || t[0] == ';' || startsWith(t, "//"))
             return t;
+
+        // CMP metadata directives are not cheat names and must never receive
+        // the normal leading '+' name marker. Also repair older +^ output.
+        if (t[0] == '^')
+            return t;
+        if (t.size() > 1U && t[0] == '+' && t[1] == '^')
+            return t.substr(1U);
+
+        // DuckStation 8+8 rows are a separate emulator format. Preserve them
+        // instead of feeding their first 12 characters to the Xploder engine.
+        std::string duckStationCode;
+        if (tryNormalizeDuckStationCodeLine(t, duckStationCode))
+            return duckStationCode;
 
         if (t[0] == '+')
         {
@@ -1327,7 +1735,7 @@ namespace xploder_converter
             std::string block;
             std::size_t lastConsumed = i;
 
-            if (options.mode == Mode::Decrypt && tryPreserveActiveMassWriteBlock(lines, i, options, block, lastConsumed))
+            if (options.mode == Mode::Decrypt && tryPreserveRawMassWriteBlock(lines, i, options, block, lastConsumed))
             {
                 out << block;
                 i = lastConsumed;

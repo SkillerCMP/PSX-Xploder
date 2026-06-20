@@ -20,6 +20,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cwctype>
+#include <filesystem>
+#include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -43,8 +47,8 @@ namespace
     constexpr wchar_t WindowClassName[] = L"XploderPsxConverterGuiWindow";
     constexpr wchar_t SplitterClassName[] = L"XploderPsxConverterSplitter";
     constexpr wchar_t AppTitle[] = L"Xploder PSX Converter";
-    constexpr wchar_t AppVersion[] = L"v1.01";
-    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.01";
+    constexpr wchar_t AppVersion[] = L"v1.02";
+    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.02";
 
     enum ControlId : int
     {
@@ -62,6 +66,7 @@ namespace
         IdClearButton,
         IdSwapButton,
         IdSplitter,
+        IdProgressBar,
         IdStatusLabel
     };
 
@@ -80,6 +85,7 @@ namespace
     HWND g_clearButton = nullptr;
     HWND g_swapButton = nullptr;
     HWND g_statusLabel = nullptr;
+    HWND g_progressBar = nullptr;
     HWND g_splitter = nullptr;
     HWND g_inputLabel = nullptr;
     HWND g_outputLabel = nullptr;
@@ -87,6 +93,7 @@ namespace
     bool g_isConverting = false;
     bool g_isLoadingInput = false;
     bool g_isDraggingSplitter = false;
+    bool g_isBatchDecrypting = false;
     double g_splitRatio = 0.5;
 
     constexpr int LayoutMargin = 10;
@@ -96,6 +103,10 @@ namespace
     void layoutControls(HWND hwnd);
     void layoutPaneControls(HWND hwnd, bool repaintImmediately);
     void convertNow();
+    void updateModeUi();
+    bool batchDecryptFolder(const std::wstring& folderPath);
+    void setBatchUiActive(bool active);
+    void updateBatchProgress(std::size_t completed, std::size_t total, const std::wstring& currentFile);
 
     std::wstring widenUtf8(const std::string& text)
     {
@@ -308,6 +319,121 @@ namespace
             SetWindowTextW(g_statusLabel, status.c_str());
     }
 
+    void pumpBatchUiMessages()
+    {
+        MSG message{};
+        bool repostQuit = false;
+        int quitCode = 0;
+
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+        {
+            if (message.message == WM_QUIT)
+            {
+                repostQuit = true;
+                quitCode = static_cast<int>(message.wParam);
+                break;
+            }
+
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        if (repostQuit)
+            PostQuitMessage(quitCode);
+    }
+
+    void refreshBatchProgressDisplay()
+    {
+        if (g_progressBar != nullptr)
+            RedrawWindow(g_progressBar, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        if (g_statusLabel != nullptr)
+            RedrawWindow(g_statusLabel, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+        pumpBatchUiMessages();
+    }
+
+    void setBatchUiActive(bool active)
+    {
+        g_isBatchDecrypting = active;
+
+        const BOOL enabled = active ? FALSE : TRUE;
+        EnableWindow(g_modeCombo, enabled);
+        EnableWindow(g_keyCombo, enabled);
+        EnableWindow(g_payloadKeyCombo, enabled);
+        EnableWindow(g_groupCheck, enabled);
+        EnableWindow(g_annotateCheck, enabled);
+        EnableWindow(g_prefixCheck, enabled);
+        EnableWindow(g_autoCheck, enabled);
+        EnableWindow(g_convertButton, enabled);
+        EnableWindow(g_copyButton, enabled);
+        EnableWindow(g_clearButton, enabled);
+        EnableWindow(g_swapButton, enabled);
+        EnableWindow(g_inputEdit, enabled);
+        EnableWindow(g_outputEdit, enabled);
+        EnableWindow(g_splitter, enabled);
+
+        if (g_inputEdit != nullptr)
+            DragAcceptFiles(g_inputEdit, active ? FALSE : TRUE);
+
+        if (g_progressBar != nullptr)
+        {
+            if (active)
+            {
+                SendMessageW(g_progressBar, PBM_SETRANGE32, 0, 1);
+                SendMessageW(g_progressBar, PBM_SETPOS, 0, 0);
+                ShowWindow(g_progressBar, SW_SHOW);
+            }
+            else
+            {
+                ShowWindow(g_progressBar, SW_HIDE);
+                SendMessageW(g_progressBar, PBM_SETPOS, 0, 0);
+            }
+        }
+
+        if (!active)
+            updateModeUi();
+
+        if (g_mainWindow != nullptr)
+            layoutControls(g_mainWindow);
+
+        refreshBatchProgressDisplay();
+    }
+
+    void updateBatchProgress(
+        std::size_t completed,
+        std::size_t total,
+        const std::wstring& currentFile)
+    {
+        if (g_progressBar == nullptr)
+            return;
+
+        const std::size_t maximumInt = static_cast<std::size_t>(std::numeric_limits<int>::max());
+        const int rangeMaximum = static_cast<int>(std::min(total, maximumInt));
+        const int position = static_cast<int>(std::min(completed, maximumInt));
+
+        SendMessageW(g_progressBar, PBM_SETRANGE32, 0, std::max(1, rangeMaximum));
+        SendMessageW(g_progressBar, PBM_SETPOS, std::min(position, std::max(1, rangeMaximum)), 0);
+
+        const std::size_t percent = total == 0U ? 0U : std::min<std::size_t>(100U, completed * 100U / total);
+        std::wstring status;
+        if (!currentFile.empty())
+        {
+            const std::size_t currentNumber = std::min(total, completed + 1U);
+            status =
+                L"Batch decrypting file " + std::to_wstring(currentNumber) + L" of " +
+                std::to_wstring(total) + L" (" + std::to_wstring(percent) + L"%): " +
+                currentFile;
+        }
+        else
+        {
+            status =
+                L"Batch decrypted " + std::to_wstring(completed) + L" of " +
+                std::to_wstring(total) + L" (" + std::to_wstring(percent) + L"%)";
+        }
+
+        setStatus(status);
+        refreshBatchProgressDisplay();
+    }
+
     void setFont(HWND hwnd)
     {
         if (hwnd != nullptr && g_uiFont != nullptr)
@@ -403,11 +529,18 @@ namespace
         if (msg == WM_DROPFILES)
         {
             HDROP drop = reinterpret_cast<HDROP>(wParam);
+            if (g_isBatchDecrypting)
+            {
+                DragFinish(drop);
+                setStatus(L"A folder batch is already running.");
+                MessageBeep(MB_ICONWARNING);
+                return 0;
+            }
             const UINT fileCount = DragQueryFileW(drop, 0xFFFFFFFFU, nullptr, 0);
 
             if (fileCount != 1U)
             {
-                setStatus(L"Drop one text file at a time onto the Input pane.");
+                setStatus(L"Drop one text file or one folder at a time onto the Input pane.");
                 MessageBeep(MB_ICONWARNING);
                 DragFinish(drop);
                 return 0;
@@ -419,7 +552,17 @@ namespace
             path.resize(pathLength);
 
             DragFinish(drop);
-            loadDroppedTextFile(path);
+
+            const DWORD attributes = GetFileAttributesW(path.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            {
+                batchDecryptFolder(path);
+            }
+            else
+            {
+                loadDroppedTextFile(path);
+            }
             return 0;
         }
 
@@ -458,13 +601,296 @@ namespace
         return options;
     }
 
+
+    bool equalsIgnoreCase(const std::wstring& left, const std::wstring& right)
+    {
+        if (left.size() != right.size())
+            return false;
+
+        for (std::size_t i = 0; i < left.size(); ++i)
+        {
+            if (std::towlower(left[i]) != std::towlower(right[i]))
+                return false;
+        }
+        return true;
+    }
+
+    bool isTextFilePath(const std::filesystem::path& path)
+    {
+        return equalsIgnoreCase(path.extension().wstring(), L".txt");
+    }
+
+    std::string useWindowsLineEndings(const std::string& text)
+    {
+        std::string output;
+        output.reserve(text.size() + text.size() / 16U + 16U);
+
+        for (std::size_t i = 0; i < text.size(); ++i)
+        {
+            const char c = text[i];
+            if (c == '\r')
+            {
+                output += "\r\n";
+                if (i + 1U < text.size() && text[i + 1U] == '\n')
+                    ++i;
+            }
+            else if (c == '\n')
+            {
+                output += "\r\n";
+            }
+            else
+            {
+                output.push_back(c);
+            }
+        }
+        return output;
+    }
+
+    bool writeUtf8TextFile(
+        const std::filesystem::path& path,
+        const std::string& text,
+        std::wstring& error)
+    {
+        error.clear();
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file)
+        {
+            error = L"Could not create the output file.";
+            return false;
+        }
+
+        const std::string windowsText = useWindowsLineEndings(text);
+        file.write(windowsText.data(), static_cast<std::streamsize>(windowsText.size()));
+        if (!file)
+        {
+            error = L"Could not finish writing the output file.";
+            return false;
+        }
+        return true;
+    }
+
+    class BatchUiScope
+    {
+    public:
+        BatchUiScope()
+        {
+            setBatchUiActive(true);
+        }
+
+        ~BatchUiScope()
+        {
+            finish();
+        }
+
+        void finish()
+        {
+            if (active_)
+            {
+                active_ = false;
+                setBatchUiActive(false);
+            }
+        }
+
+        BatchUiScope(const BatchUiScope&) = delete;
+        BatchUiScope& operator=(const BatchUiScope&) = delete;
+
+    private:
+        bool active_ = true;
+    };
+
+    bool batchDecryptFolder(const std::wstring& folderPath)
+    {
+        namespace fs = std::filesystem;
+
+        if (g_isBatchDecrypting)
+            return false;
+
+        BatchUiScope batchUi;
+        setStatus(L"Scanning dropped folder for .txt files...");
+        refreshBatchProgressDisplay();
+
+        const fs::path sourceRoot(folderPath);
+        const fs::path outputRoot = sourceRoot / L"Decrypted";
+        std::vector<fs::path> inputFiles;
+        std::error_code errorCode;
+
+        fs::recursive_directory_iterator iterator(
+            sourceRoot,
+            fs::directory_options::skip_permission_denied,
+            errorCode);
+        const fs::recursive_directory_iterator end;
+
+        if (errorCode)
+        {
+            setStatus(L"Could not scan the dropped folder.");
+            MessageBeep(MB_ICONWARNING);
+            return false;
+        }
+
+        while (iterator != end)
+        {
+            const fs::directory_entry entry = *iterator;
+            std::error_code entryError;
+
+            if (entry.is_directory(entryError))
+            {
+                // Never process a previous batch's output as new input.
+                if (equalsIgnoreCase(entry.path().filename().wstring(), L"Decrypted"))
+                    iterator.disable_recursion_pending();
+            }
+            else if (!entryError && entry.is_regular_file(entryError) &&
+                     !entryError && isTextFilePath(entry.path()))
+            {
+                inputFiles.push_back(entry.path());
+            }
+
+            iterator.increment(errorCode);
+            if (errorCode)
+                errorCode.clear();
+        }
+
+        std::sort(inputFiles.begin(), inputFiles.end());
+        if (inputFiles.empty())
+        {
+            setStatus(L"The dropped folder does not contain any .txt files.");
+            MessageBeep(MB_ICONWARNING);
+            return false;
+        }
+
+        fs::create_directories(outputRoot, errorCode);
+        if (errorCode)
+        {
+            setStatus(L"Could not create the Decrypted output folder.");
+            MessageBeep(MB_ICONWARNING);
+            return false;
+        }
+
+        xploder_converter::Options options = selectedOptions();
+        options.mode = xploder_converter::Mode::Decrypt;
+        options.groupEncryptedOutput = false;
+
+        std::size_t convertedCount = 0;
+        std::size_t failedCount = 0;
+        std::wstring firstFailure;
+
+        SendMessageW(
+            g_progressBar,
+            PBM_SETRANGE32,
+            0,
+            static_cast<LPARAM>(std::min<std::size_t>(
+                inputFiles.size(),
+                static_cast<std::size_t>(std::numeric_limits<int>::max()))));
+        SendMessageW(g_progressBar, PBM_SETPOS, 0, 0);
+
+        for (std::size_t fileIndex = 0; fileIndex < inputFiles.size(); ++fileIndex)
+        {
+            const fs::path& inputPath = inputFiles[fileIndex];
+            updateBatchProgress(fileIndex, inputFiles.size(), inputPath.filename().wstring());
+
+            std::vector<std::uint8_t> bytes;
+            std::wstring fileError;
+            if (!readDroppedFileBytes(inputPath.wstring(), bytes, fileError))
+            {
+                ++failedCount;
+                if (firstFailure.empty())
+                    firstFailure = inputPath.filename().wstring() + L": " + fileError;
+                updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
+                continue;
+            }
+
+            std::wstring decoded = decodeDroppedText(bytes);
+            while (!decoded.empty() && decoded.back() == L'\0')
+                decoded.pop_back();
+            if (decoded.find(L'\0') != std::wstring::npos)
+            {
+                ++failedCount;
+                if (firstFailure.empty())
+                    firstFailure = inputPath.filename().wstring() + L": binary data detected.";
+                updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
+                continue;
+            }
+
+            try
+            {
+                const std::string sourceUtf8 = narrowUtf8(decoded);
+                const std::string normalized =
+                    xploder_converter::normalizeBatchDecryptInput(sourceUtf8);
+                const std::string decrypted =
+                    xploder_converter::convertText(normalized, options);
+
+                fs::path relativePath = inputPath.lexically_relative(sourceRoot);
+                if (relativePath.empty() || relativePath.native().find(L"..") == 0U)
+                    relativePath = inputPath.filename();
+
+                const fs::path outputPath = outputRoot / relativePath;
+                fs::create_directories(outputPath.parent_path(), errorCode);
+                if (errorCode)
+                {
+                    ++failedCount;
+                    if (firstFailure.empty())
+                        firstFailure = outputPath.filename().wstring() + L": could not create its output folder.";
+                    errorCode.clear();
+                    updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
+                continue;
+                }
+
+                if (!writeUtf8TextFile(outputPath, decrypted, fileError))
+                {
+                    ++failedCount;
+                    if (firstFailure.empty())
+                        firstFailure = outputPath.filename().wstring() + L": " + fileError;
+                    updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
+                continue;
+                }
+
+                ++convertedCount;
+            }
+            catch (const std::exception& ex)
+            {
+                ++failedCount;
+                if (firstFailure.empty())
+                    firstFailure = inputPath.filename().wstring() + L": " + widenUtf8(ex.what());
+            }
+            catch (...)
+            {
+                ++failedCount;
+                if (firstFailure.empty())
+                    firstFailure = inputPath.filename().wstring() + L": unknown conversion error.";
+            }
+
+            updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
+        }
+
+        std::wstring summary =
+            L"Batch decrypted " + std::to_wstring(convertedCount) +
+            L" text file(s) into:\n" + outputRoot.wstring();
+        if (failedCount != 0U)
+        {
+            summary += L"\n\nFailed: " + std::to_wstring(failedCount);
+            if (!firstFailure.empty())
+                summary += L"\nFirst error: " + firstFailure;
+        }
+
+        batchUi.finish();
+        setStatus(
+            L"Batch complete: " + std::to_wstring(convertedCount) +
+            L" decrypted, " + std::to_wstring(failedCount) + L" failed.");
+        MessageBoxW(
+            g_mainWindow,
+            summary.c_str(),
+            L"Folder Batch Decrypt",
+            failedCount == 0U ? MB_OK | MB_ICONINFORMATION : MB_OK | MB_ICONWARNING);
+        return convertedCount != 0U;
+    }
+
     void updateModeUi()
     {
         const bool encrypt = comboIndex(g_modeCombo) == 1;
         EnableWindow(g_keyCombo, encrypt ? TRUE : FALSE);
         EnableWindow(g_groupCheck, encrypt ? TRUE : FALSE);
-        // The selected Type 5 payload key is used when encrypting both normal
-        // and nested active Type 5 blocks. Decrypt reads the key from encrypted headers.
+        // The selected Type 5 payload key is used when encrypting every
+        // external RAW Type 5 block, including one immediately after Type 6.
+        // Decrypt reads the key from the encrypted Type 5 public header.
         EnableWindow(g_payloadKeyCombo, encrypt ? TRUE : FALSE);
     }
 
@@ -574,8 +1000,12 @@ namespace
         const int controlsH = 76;
         const int labelH = 20;
         const int statusH = 24;
+        const int progressH = 18;
+        const int progressGap = 6;
+        const bool progressVisible = g_progressBar != nullptr && IsWindowVisible(g_progressBar) != FALSE;
+        const int batchAreaH = progressVisible ? progressH + progressGap : 0;
         const int editorTop = top + controlsH + labelH + 4;
-        const int editorBottom = height - statusH - margin;
+        const int editorBottom = height - statusH - batchAreaH - margin;
         const int editorH = std::max(40, editorBottom - editorTop);
 
         const int availablePaneWidth = std::max(0, width - margin * 2 - SplitterWidth);
@@ -775,6 +1205,8 @@ namespace
         const int gap = 10;
         const int top = 10;
         const int statusH = 24;
+        const int progressH = 18;
+        const int progressGap = 6;
 
         int x = margin;
         int y = top;
@@ -807,6 +1239,16 @@ namespace
         MoveWindow(g_autoCheck, x, y, 115, 22, TRUE);
 
         layoutPaneControls(hwnd, true);
+        if (g_progressBar != nullptr && IsWindowVisible(g_progressBar) != FALSE)
+        {
+            MoveWindow(
+                g_progressBar,
+                margin,
+                height - statusH - progressGap - progressH,
+                std::max(10, width - margin * 2),
+                progressH,
+                TRUE);
+        }
         MoveWindow(g_statusLabel, margin, height - statusH, width - margin * 2, statusH, TRUE);
     }
 
@@ -814,7 +1256,7 @@ namespace
     {
         INITCOMMONCONTROLSEX icc{};
         icc.dwSize = sizeof(icc);
-        icc.dwICC = ICC_STANDARD_CLASSES;
+        icc.dwICC = ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS;
         InitCommonControlsEx(&icc);
 
         g_uiFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
@@ -832,8 +1274,8 @@ namespace
         SendMessageW(g_keyCombo, CB_SETCURSEL, 1, 0);
 
         g_payloadKeyCombo = createControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, IdPayloadKeyCombo, hwnd);
-        addComboItem(g_payloadKeyCombo, L"Type 5 key 6 (normal + nested)");
-        addComboItem(g_payloadKeyCombo, L"Type 5 key 7 (normal + nested)");
+        addComboItem(g_payloadKeyCombo, L"Type 5 payload key 6");
+        addComboItem(g_payloadKeyCombo, L"Type 5 payload key 7");
         SendMessageW(g_payloadKeyCombo, CB_SETCURSEL, 0, 0);
 
         g_convertButton = createControl(L"BUTTON", L"Convert", BS_PUSHBUTTON | WS_TABSTOP, 0, IdConvertButton, hwnd);
@@ -847,7 +1289,7 @@ namespace
         SendMessageW(g_prefixCheck, BM_SETCHECK, BST_CHECKED, 0);
         g_autoCheck = createControl(L"BUTTON", L"Auto Convert", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdAutoCheck, hwnd);
 
-        g_inputLabel = createControl(L"STATIC", L"Input (drop a text file here)", 0, 0, 0, hwnd);
+        g_inputLabel = createControl(L"STATIC", L"Input (drop a text file or folder here)", 0, 0, 0, hwnd);
         g_outputLabel = createControl(L"STATIC", L"Output", 0, 0, 0, hwnd);
         g_splitter = createControl(SplitterClassName, L"", 0, 0, IdSplitter, hwnd);
 
@@ -860,6 +1302,15 @@ namespace
 
         SendMessageW(g_inputEdit, EM_SETLIMITTEXT, 0, 0);
         SendMessageW(g_outputEdit, EM_SETLIMITTEXT, 0, 0);
+
+        g_progressBar = createControl(
+            PROGRESS_CLASSW,
+            L"",
+            PBS_SMOOTH,
+            0,
+            IdProgressBar,
+            hwnd);
+        ShowWindow(g_progressBar, SW_HIDE);
 
         g_statusLabel = createControl(L"STATIC", L"Ready.", 0, 0, IdStatusLabel, hwnd);
 
@@ -925,6 +1376,16 @@ namespace
                 }
                 return 0;
             }
+
+            case WM_CLOSE:
+                if (g_isBatchDecrypting)
+                {
+                    setStatus(L"Please wait for the folder batch to finish before closing.");
+                    MessageBeep(MB_ICONWARNING);
+                    return 0;
+                }
+                DestroyWindow(hwnd);
+                return 0;
 
             case WM_DESTROY:
                 PostQuitMessage(0);

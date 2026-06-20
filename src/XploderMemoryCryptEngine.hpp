@@ -6,7 +6,8 @@
 // Supports:
 //   - Normal 6-byte XplorerPro / FX code-line decrypt/encrypt, keys 4/5/6/7.
 //   - Xploder memory-dump route behavior for decrypting normal lines.
-//   - Loader-side Type 5 / Type 6 mass-write header conversion.
+//   - Canonical external RAW Type 5 / Type 6 block conversion.
+//   - Loader-internal Type 5/6 size accounting without leaking expanded values.
 //   - Forced Type 5 / Type 6 payload chunk decrypt/encrypt for payload keys 6 and 7.
 //
 // No file I/O in this engine header.
@@ -52,9 +53,11 @@ namespace xploder_psx
     struct MassWriteInfo
     {
         int payloadKey = 0;
-        int payloadSize = 0;        // value written to the active header
-        int sourcePayloadSize = 0;  // bytes supplied by following source rows
-        int payloadLineCount = 0;   // ceil(sourcePayloadSize / 6)
+        int payloadSize = 0;         // external RAW size field: Type 5=count, Type 6=continuation bytes after first 2 inline bytes
+        int payloadByteCount = 0;    // actual data bytes: Type 5=size, Type 6=size+2
+        int runtimePayloadSize = 0;  // loader-internal expanded value (+0x06/+0x12)
+        int sourcePayloadSize = 0;   // following bytes, including the Type 6 descriptor when present
+        int payloadLineCount = 0;    // ceil(sourcePayloadSize / 6)
         bool isType6 = false;
     };
 
@@ -257,6 +260,21 @@ namespace xploder_psx
         }
     }
 
+    // Convert one Type 5 payload row between the loader's active-slot byte
+    // order and the conventional RAW code display order. The operation is
+    // self-inverse: reverse the 32-bit address word and the 16-bit value word
+    // independently. Example: AC080004 0008 <-> 040008AC 0800.
+    inline void swapType5PayloadByteOrder(Code& code) noexcept
+    {
+        const Code input = code;
+        code[0] = input[3];
+        code[1] = input[2];
+        code[2] = input[1];
+        code[3] = input[0];
+        code[4] = input[5];
+        code[5] = input[4];
+    }
+
     // Encrypt one active-slot Type 5/6 payload chunk back to encrypted payload form.
     inline bool encryptPayloadChunk(Code& code, int payloadKey) noexcept
     {
@@ -289,6 +307,57 @@ namespace xploder_psx
         }
     }
 
+    // Compute the physical layout represented by a canonical external RAW
+    // Type 5 or Type 6 size field.
+    //
+    // Type 5 stores a direct payload byte count (1..0x0FFF).
+    // Type 6 stores the number of payload bytes that follow the first two
+    // payload bytes carried inline after the breakpoint mask. Therefore the
+    // actual payload byte count is sizeField + 2. Its following rows begin with
+    // ten descriptor bytes: break address/type (6) + break mask (4). The first
+    // two payload bytes share the row containing the mask.
+    inline bool trySetMassWriteLayout(MassWriteInfo& info, bool isType6, int sizeField) noexcept
+    {
+        info.isType6 = isType6;
+        info.payloadSize = sizeField;
+
+        if (isType6)
+        {
+            if (sizeField < 0 || sizeField > 0xFFFF)
+                return false;
+
+            info.payloadByteCount = sizeField + 2;
+            // Loader-active length includes the 6-byte Type 6 header, the
+            // 10-byte breakpoint descriptor, and the two inline payload bytes.
+            info.runtimePayloadSize = sizeField + 0x12;
+            info.sourcePayloadSize = info.payloadByteCount + 0x0A;
+        }
+        else
+        {
+            if (sizeField <= 0 || sizeField > 0x0FFF)
+                return false;
+
+            info.payloadByteCount = sizeField;
+            info.runtimePayloadSize = sizeField + 0x06;
+            info.sourcePayloadSize = info.payloadByteCount;
+        }
+
+        info.payloadLineCount =
+            (info.sourcePayloadSize + static_cast<int>(CodeLength) - 1) /
+            static_cast<int>(CodeLength);
+        return info.payloadLineCount > 0;
+    }
+
+    // Parse a decrypted/public Type 5 or Type 6 header.
+    //
+    // Canonical external RAW size fields:
+    //   Type 5: nnn is the direct number of payload bytes after the header.
+    //   Type 6: nnnn is the number of payload bytes after the first two
+    //           inline payload bytes; actual data bytes are nnnn+2. The rows
+    //           also contain the 10-byte breakpoint descriptor described above.
+    //
+    // The loader may expand these values internally by +0x06 (Type 5) or
+    // +0x12 (Type 6), but those runtime values are never exported as RAW.
     inline bool tryGetMassWriteInfoFromPublicHeader(const Code& publicHeader, MassWriteInfo& info) noexcept
     {
         info = {};
@@ -297,98 +366,98 @@ namespace xploder_psx
         if (codeType != 0x50 && codeType != 0x60)
             return false;
 
-        info.isType6 = (codeType == 0x60);
+        const bool isType6 = (codeType == 0x60);
+        int sizeField = 0;
 
-        if (info.isType6)
+        if (isType6)
         {
             info.payloadKey = publicHeader[3] & 0x0F;
-            const int baseSize = (static_cast<int>(publicHeader[4]) << 8) | publicHeader[5];
-            info.payloadSize = baseSize + 0x12;
-
-            // Type 6 source rows include the fixed 0x12-byte descriptor plus
-            // the public base-size bytes, so the full active size is consumed.
-            info.sourcePayloadSize = info.payloadSize;
+            sizeField =
+                (static_cast<int>(publicHeader[4]) << 8) |
+                publicHeader[5];
         }
         else
         {
             info.payloadKey = publicHeader[4] >> 4;
-            const int baseSize = ((publicHeader[4] & 0x0F) << 8) | publicHeader[5];
-            info.payloadSize = baseSize + 0x06;
-
-            // Type 5 adds 0x06 to the active header value, but those six bytes
-            // are not another following payload row. Only the public base-size
-            // bytes are supplied after the header.
-            info.sourcePayloadSize = baseSize;
+            sizeField =
+                ((static_cast<int>(publicHeader[4]) & 0x0F) << 8) |
+                publicHeader[5];
         }
 
-        if (info.payloadSize <= 0 || info.sourcePayloadSize <= 0)
-            return false;
-
-        info.payloadLineCount = (info.sourcePayloadSize + static_cast<int>(CodeLength) - 1) / static_cast<int>(CodeLength);
-        return true;
+        return trySetMassWriteLayout(info, isType6, sizeField);
     }
 
+    // Decrypt an encrypted/public mass-write header into canonical external RAW
+    // form. The historical function name is retained for source compatibility;
+    // the returned header is no longer the loader's expanded active form.
     inline bool decryptMassWriteHeaderToActive(Code& header, MassWriteInfo& info) noexcept
     {
         const Code original = header;
         const bool decryptApplied = decryptCode(header);
 
-        // Copy/pass-through lines like $52...... should not be treated as mass-write headers.
-        // Raw public headers with low nibble 0 are allowed.
+        // Copy/pass-through lines like $52...... are not mass-write headers.
+        // A keyless external RAW Type 5/6 header is allowed.
         if (!decryptApplied && (original[0] & 0x0F) != 0)
             return false;
 
         if (!tryGetMassWriteInfoFromPublicHeader(header, info))
             return false;
 
-        header[4] = byte(info.payloadSize >> 8);
-        header[5] = byte(info.payloadSize);
+        // Type 5 public headers store the payload key in the high nibble of the
+        // size word. Canonical RAW headers are keyless and show the exact byte
+        // count directly. Type 6 already stores its continuation-byte count directly.
+        if (!info.isType6)
+        {
+            header[4] = byte(info.payloadSize >> 8);
+            header[5] = byte(info.payloadSize);
+        }
+
         return true;
     }
 
-    inline bool encryptMassWriteHeaderFromActive(Code& activeHeader, Key normalLineKey, int payloadKey, MassWriteInfo* infoOut = nullptr) noexcept
+    // Encrypt a canonical external RAW mass-write header. The historical
+    // function name is retained for source compatibility.
+    inline bool encryptMassWriteHeaderFromActive(Code& rawHeader, Key normalLineKey, int payloadKey, MassWriteInfo* infoOut = nullptr) noexcept
     {
         if (payloadKey < 0 || payloadKey > 0x0F)
             return false;
 
-        const int codeType = activeHeader[0] & 0xF0;
+        const int codeType = rawHeader[0] & 0xF0;
         if (codeType != 0x50 && codeType != 0x60)
             return false;
 
         const bool isType6 = (codeType == 0x60);
-        const int payloadSize = (static_cast<int>(activeHeader[4]) << 8) | activeHeader[5];
-        const int adjust = isType6 ? 0x12 : 0x06;
-        const int baseSize = payloadSize - adjust;
+        const int baseSize =
+            (static_cast<int>(rawHeader[4]) << 8) |
+            rawHeader[5];
 
-        if (payloadSize <= 0 || baseSize < 0 || baseSize > 0x0FFF)
+        MassWriteInfo layout;
+        layout.payloadKey = payloadKey;
+        if (!trySetMassWriteLayout(layout, isType6, baseSize))
             return false;
 
-        Code publicHeader = activeHeader;
+        Code publicHeader = rawHeader;
         if (isType6)
         {
-            publicHeader[3] = byte((publicHeader[3] & 0xF0) | (payloadKey & 0x0F));
+            publicHeader[3] = byte(
+                (publicHeader[3] & 0xF0) |
+                (payloadKey & 0x0F));
             publicHeader[4] = byte(baseSize >> 8);
             publicHeader[5] = byte(baseSize);
         }
         else
         {
-            publicHeader[4] = byte(((payloadKey & 0x0F) << 4) | ((baseSize >> 8) & 0x0F));
+            publicHeader[4] = byte(
+                ((payloadKey & 0x0F) << 4) |
+                ((baseSize >> 8) & 0x0F));
             publicHeader[5] = byte(baseSize);
         }
 
         if (infoOut != nullptr)
-        {
-            infoOut->payloadKey = payloadKey;
-            infoOut->payloadSize = payloadSize;
-            infoOut->sourcePayloadSize = isType6 ? payloadSize : baseSize;
-            infoOut->payloadLineCount =
-                (infoOut->sourcePayloadSize + static_cast<int>(CodeLength) - 1) /
-                static_cast<int>(CodeLength);
-            infoOut->isType6 = isType6;
-        }
+            *infoOut = layout;
 
-        activeHeader = publicHeader;
-        return encryptCode(activeHeader, normalLineKey);
+        rawHeader = publicHeader;
+        return encryptCode(rawHeader, normalLineKey);
     }
 
     inline bool decryptMassWriteBlock(const std::vector<Code>& input, std::vector<Code>& output, MassWriteInfo& info)
@@ -412,7 +481,12 @@ namespace xploder_psx
         for (int i = 0; i < info.payloadLineCount; ++i)
         {
             Code payload = input[static_cast<std::size_t>(1 + i)];
-            decryptPayloadChunk(payload, info.payloadKey);
+            if (info.payloadKey == 6 || info.payloadKey == 7)
+            {
+                decryptPayloadChunk(payload, info.payloadKey);
+                if (!info.isType6)
+                    swapType5PayloadByteOrder(payload);
+            }
             output.push_back(payload);
         }
 
@@ -433,20 +507,26 @@ namespace xploder_psx
             return false;
 
         const bool isType6 = codeType == 0x60;
-        const int payloadSize = (static_cast<int>(header[4]) << 8) | header[5];
-        const int sourcePayloadSize = isType6 ? payloadSize : payloadSize - 0x06;
-        const int payloadLineCount =
-            (sourcePayloadSize + static_cast<int>(CodeLength) - 1) /
-            static_cast<int>(CodeLength);
+        const int baseSize =
+            (static_cast<int>(header[4]) << 8) |
+            header[5];
+        MassWriteInfo layout;
+        layout.payloadKey = payloadKey;
+        if (!trySetMassWriteLayout(layout, isType6, baseSize))
+            return false;
 
-        if (payloadSize <= 0 || sourcePayloadSize <= 0 ||
-            input.size() < static_cast<std::size_t>(1 + payloadLineCount))
+        const int payloadLineCount = layout.payloadLineCount;
+
+        if (input.size() < static_cast<std::size_t>(1 + payloadLineCount))
         {
             return false;
         }
 
-        if (!encryptMassWriteHeaderFromActive(header, normalLineKey, payloadKey, &info))
+        if (!encryptMassWriteHeaderFromActive(
+                header, normalLineKey, payloadKey, &info))
+        {
             return false;
+        }
 
         output.reserve(1 + static_cast<std::size_t>(payloadLineCount));
         output.push_back(header);
@@ -454,7 +534,12 @@ namespace xploder_psx
         for (int i = 0; i < payloadLineCount; ++i)
         {
             Code payload = input[static_cast<std::size_t>(1 + i)];
-            encryptPayloadChunk(payload, payloadKey);
+            if (payloadKey == 6 || payloadKey == 7)
+            {
+                if (!isType6)
+                    swapType5PayloadByteOrder(payload);
+                encryptPayloadChunk(payload, payloadKey);
+            }
             output.push_back(payload);
         }
 
