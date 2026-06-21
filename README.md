@@ -13,6 +13,10 @@ Xploder PSX Converter README
 ![License](https://img.shields.io/badge/license-GPLv3-red)
 
 </div>
+<a href="https://github.com/SkillerCMP/PSX-Xploder/releases" target="_blank">
+    <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/SkillerCMP/PSX-Xploder/total?style=social">
+  </a>
+<img alt="GitHub Downloads (all assets, latest release)" src="https://img.shields.io/github/downloads/SkillerCMP/PSX-Xploder/latest/total?style=social">
 
 ---
 
