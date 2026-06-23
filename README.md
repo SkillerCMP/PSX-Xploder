@@ -1,127 +1,482 @@
 <!--
 Xploder PSX Converter README
 -->
+
 <div align="center">
 
 # 🔴 Xploder PSX Converter
 
-### A clean Windows GUI for Xploder / Xplorer PSX cheat-code conversion
+### Native Windows conversion tools for PlayStation 1 cheat-code formats
 
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![Language](https://img.shields.io/badge/language-C%2B%2B17-blue)
 ![Build](https://img.shields.io/badge/build-MSVC-green)
 ![License](https://img.shields.io/badge/license-GPLv3-red)
+![Version](https://img.shields.io/badge/version-v1.03-brightgreen)
+
+<a href="https://github.com/SkillerCMP/PSX-Xploder/releases">
+  <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/SkillerCMP/PSX-Xploder/total?style=social">
+</a>
+<img alt="GitHub Downloads (latest release)" src="https://img.shields.io/github/downloads/SkillerCMP/PSX-Xploder/latest/total?style=social">
 
 </div>
-<a href="https://github.com/SkillerCMP/PSX-Xploder/releases" target="_blank">
-    <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/SkillerCMP/PSX-Xploder/total?style=social">
-  </a>
-<img alt="GitHub Downloads (all assets, latest release)" src="https://img.shields.io/github/downloads/SkillerCMP/PSX-Xploder/latest/total?style=social">
 
 ---
 
 ## 📌 Overview
 
-**Xploder PSX Converter** is a native Windows utility for converting PlayStation 1 Xploder / Xplorer-style cheat codes between encrypted and decrypted formats.
+**Xploder PSX Converter** is a native Windows utility for PlayStation 1 cheat-code conversion and preservation.
 
-This project focuses on practical PlayStation cheat-code research, especially:
+It supports window-to-window conversion between:
 
-- Xploder PSX code encryption and decryption
-- CMP-style text handling
-- RAW/encrypted auto-detection
-- Xploder Type 5 mass-write / payload behavior
-- Active-memory behavior observed through memory-dump testing
+```text
+GameShark / Action Replay
+Xploder Encrypted
+Xploder RAW
+DuckStation
+Caetla
+```
+
+The project includes Xploder encryption/decryption, structured Type 5 and Type 6 handling, DuckStation patch metadata, CMP database formatting, folder batch cleanup, wildcard preservation, activator conversion, and code-type condensation.
 
 ---
 
 <details open>
-<summary><strong>✨ Features</strong></summary>
+<summary><strong>✨ Main Features</strong></summary>
 
 <br>
 
-- Convert encrypted Xploder PSX codes to decrypted RAW-style lines.
-- Encrypt RAW-style Xploder lines back to Xploder format.
-- Auto-detect RAW vs encrypted input where possible.
-- Export Type 5 and Type 6 blocks in canonical external RAW form without leaking loader-only expanded sizes.
-- Rebuild standalone Type 5 blocks and Type 5 blocks that immediately follow Type 6 using the selected Type 5 payload key.
-- Preserve CMP-style metadata and directives.
-- Drop one text file directly onto the Input pane to load it.
-- Drop a folder onto the Input pane to batch-clean and decrypt every `.txt` file.
-- Dropped files support UTF-8, UTF-8 BOM, UTF-16 LE/BE BOM, and legacy ANSI text.
-- Folder batches export into a `Decrypted` folder using the same filenames and mirrored subfolders.
-- Normalize pasted or dropped line endings.
-- Native Windows desktop GUI.
-- Draggable divider for resizing the Input and Output panes. The divider previews the new position while dragging, then resizes both panes cleanly on release.
-- Simple MSVC build script.
-- Optional Win32 / Win64 build output.
-- Custom glowing neon red **X** icon.
+- Independent **Input Type** and **Output Type** selectors.
+- Window-to-window conversion through a shared semantic code model.
+- Xploder encryption and decryption using supported key styles.
+- Canonical Xploder Type 5 and Type 6 RAW output.
+- GameShark, Action Replay, DuckStation, Caetla, and Xploder code-type translation.
+- DuckStation patch-section generation and reverse conversion.
+- Nested CMP group and subgroup support.
+- GameShark Type 5 serial-repeater condensation and expansion.
+- DuckStation `80 + 80 -> 90` write combining.
+- DuckStation `D0 / 70 -> C0` activator-block condensation.
+- Reverse expansion of DuckStation `C0` blocks to GameShark `D0` or Xploder Type `7`.
+- CMP-compatible names, credits, and `$` code-line formatting.
+- Folder drag-and-drop batch cleanup and Xploder decryption.
+- UTF-8, UTF-16, ANSI, LF, CRLF, and browser/chat line-ending support.
+- Persistent program settings.
+- Resizable Input and Output panes.
+- Native Windows desktop interface.
 
 </details>
 
 ---
 
-<details>
-<summary><strong>🔑 Supported Xploder Key Styles</strong></summary>
+<details open>
+<summary><strong>🔄 Window-to-Window Conversion</strong></summary>
 
 <br>
 
-The converter supports the common Xploder / Xplorer key styles used for normal code encryption and decryption:
-
-| Key | Style Name | Notes |
-|---:|---|---|
-| Key 4 | `WHBX` style | Rolling XOR-style behavior seen from the Xploder dump constants. |
-| Key 5 | `WB123` style | Common Xploder / XplorerPro style key. |
-| Key 6 | `AB + XOR` style | Behavior-based label; does not have the same readable text marker as the others. |
-| Key 7 | `FCD!` style | Rolling ADD-style behavior seen from the Xploder dump constants. |
-
-</details>
-
----
-
-<details>
-<summary><strong>🧩 CMP / Text Format Support</strong></summary>
-
-<br>
-
-The converter is designed to work cleanly with CMP-style cheat text.
-
-It preserves common metadata and structure lines such as:
+The Input and Output panes use separate format selectors:
 
 ```text
-^1 = Hash:
-^2 = GameID:
-^3 = NAME:
-+Code Name
-%Credits
-!Group:
+Input Type  -> parser used for the Input pane
+Output Type -> emitter used for the Output pane
 ```
 
-This allows the tool to be used for practical code-list conversion without destroying the surrounding file structure.
+Available formats:
 
-Encrypted output uses standard CMP `8 + 4` spacing by default:
+```text
+GameShark / Action Replay
+Xploder Encrypted
+Xploder RAW
+DuckStation
+Caetla
+```
+
+The converter uses semantic operations instead of changing only the first hexadecimal digit.
+
+Supported operations include:
+
+- 8-bit, 16-bit, and 32-bit writes
+- equal and not-equal comparisons
+- increment and decrement operations
+- copy-memory blocks
+- GameShark serial repeaters
+- DuckStation conditional writes
+- DuckStation block activators
+- Xploder Type 5 mass-write expansion
+- Xploder Type 6 structured payloads
+- Caetla-native arithmetic types
+- wildcard-preserving structural conversions
+
+Examples:
+
+```text
+GameShark / Action Replay       Xploder RAW
+D006BD92 FBFF              ->   7006BD92 FBFF
+8002BEBA 2400                   8002BEBA 2400
+```
+
+```text
+DuckStation                     GameShark / Action Replay
+90008000 3C148006          ->   80008000 8006
+                                 80008002 3C14
+```
+
+```text
+Caetla                          DuckStation
+10012345 0005              ->   20012345 0005
+12012348 00001000               60012348 00001000
+```
+
+When no exact destination equivalent exists, the converter preserves the original code with a clear warning instead of silently guessing or deleting it.
+
+</details>
+
+---
+
+<details>
+<summary><strong>🧾 CMP Database Compatible Output</strong></summary>
+
+<br>
+
+The **CMP DB Compatible Output** option controls all CMP presentation rules together.
+
+When enabled:
+
+```text
++Code Name
+%Credits: Author Name
+$80012345 0063
+```
+
+When disabled:
+
+```text
+Code Name, by Author Name
+80012345 0063
+```
+
+The option controls:
+
+- `+` before code names
+- `%Credits:` author lines
+- `$` before hexadecimal code rows
+
+It does not change code behavior.
+
+DuckStation output still uses its required section metadata:
+
+```text
+[Infinite Health]
+Type = Gameshark
+Activation = EndFrame
+Description = Keeps health full during battle.
+Author = Code Master
+80012345 0063
+```
+
+For DuckStation output, CMP compatibility controls only the leading `$` on code rows.
+
+</details>
+
+---
+
+<details>
+<summary><strong>🦆 DuckStation Patch Format</strong></summary>
+
+<br>
+
+CMP-style entries are converted into DuckStation patch sections.
+
+Input:
+
+```text
++Moon Jump {Allows jumping while airborne.} , Crypt: Pro Action Replay/GameShark
+%Credits: Code Master
+80012340 0001
+```
+
+DuckStation output:
+
+```text
+[Moon Jump]
+Type = Gameshark
+Activation = EndFrame
+Description = Allows jumping while airborne.
+Author = Code Master
+80012340 0001
+```
+
+Metadata rules:
+
+- `+Code Name` becomes `[Code Name]`.
+- A trailing `Crypt:` section is removed.
+- Text inside `{...}` becomes `Description`.
+- `%Credits:` becomes `Author`.
+- `%Credits:` takes priority over an inline `by Name`.
+- `Type = Gameshark` is always emitted.
+- `Activation = EndFrame` is always emitted.
+- Code-only input uses `[Unnamed Cheat]`.
+
+DuckStation-to-DuckStation conversion also rebuilds nonstandard CMP-style headings into canonical DuckStation sections.
+
+</details>
+
+---
+
+<details>
+<summary><strong>📂 DuckStation Groups and Subgroups</strong></summary>
+
+<br>
+
+CMP group markers are converted into DuckStation backslash-delimited section paths.
+
+```text
+!Group Name:   opens one group level
+!!             closes the most recently opened level
+```
+
+Example:
+
+```text
+!Player Info:
+!Player Codes:
++Infinite Health
+80012340 0063
+!!
+!Movement:
++Moon Jump
+80012344 0001
+!!
+!!
+```
+
+DuckStation output:
+
+```text
+[Player Info\Player Codes\Infinite Health]
+Type = Gameshark
+Activation = EndFrame
+80012340 0063
+
+[Player Info\Movement\Moon Jump]
+Type = Gameshark
+Activation = EndFrame
+80012344 0001
+```
+
+When DuckStation is converted to another output family, section paths are rebuilt into CMP-style group stacks.
+
+Input:
+
+```text
+[Unlimited Nitrous\P1]
+[Unlimited Nitrous\P2]
+[Unlimited Nitrous\P3]
+```
+
+Output:
+
+```text
+!Unlimited Nitrous:
++P1
+...
++P2
+...
++P3
+...
+!!
+```
+
+Consecutive patches sharing the same path stay inside one open group.
+
+</details>
+
+---
+
+<details>
+<summary><strong>⚙️ Automatic Code-Type Conversion</strong></summary>
+
+<br>
+
+### DuckStation: combine adjacent Type 80 writes
+
+When enabled:
+
+```text
+80008000 8006
+80008002 3C14
+```
+
+becomes:
+
+```text
+90008000 3C148006
+```
+
+The lower-address halfword becomes the low 16 bits of the 32-bit value.
+
+Wildcard halves are supported:
+
+```text
+8000C03C ????
+8000C03E 240B
+```
+
+becomes:
+
+```text
+9000C03C 240B????
+```
+
+### DuckStation: condense equal activators
+
+Repeated GameShark `D0` or Xploder Type `7` activators can be condensed into one bounded DuckStation `C0` block.
+
+Input:
+
+```text
+D00D0A3A 0062
+800D0A3C 3FC7
+D00D0A3A 0062
+800D0A3E 0800
+```
+
+DuckStation output:
+
+```text
+C00D0A3A 0062
+800D0A3C 3FC7
+800D0A3E 0800
+00000000 FFFF
+```
+
+Reverse conversion expands the block safely:
+
+```text
+GameShark / Action Replay -> repeated D0
+Xploder RAW / Encrypted   -> repeated Type 7
+```
+
+DuckStation `D1` not-equal activators continue to convert to Xploder Type `9`.
+
+### GameShark Type 5 serial repeater
+
+Compatible Type `30` or Type `80` write sequences can be condensed.
+
+Input:
+
+```text
+300D0A3A 0062
+300D0A3B 0062
+300D0A3C 0062
+300D0A3D 0062
+300D0A3E 0062
+300D0A3F 0062
+300D0A40 0062
+300D0A41 0062
+```
+
+Condensed output:
+
+```text
+50000801 0000
+300D0A3A 0062
+```
+
+The repeater header stores:
+
+```text
+repeat count
+address step
+value step
+```
+
+At least three compatible writes are required.
+
+When a GameShark, DuckStation, or Caetla Type 5 repeater is converted to Xploder, it is expanded into individual Type `3` or Type `8` writes first because GameShark Type 5 and Xploder Type 5 are different formats.
+
+</details>
+
+---
+
+<details>
+<summary><strong>🔑 Xploder Encryption Keys</strong></summary>
+
+<br>
+
+| Key | Style | Notes |
+|---:|---|---|
+| 4 | `WHBX` | Rolling XOR-style behavior |
+| 5 | `WB123` | Common Xploder / XplorerPro style |
+| 6 | `AB + XOR` | Behavior-based label |
+| 7 | `FCD!` | Rolling ADD-style behavior |
+
+Xploder Type 5 payload encryption supports payload keys:
+
+```text
+Key 6
+Key 7
+```
+
+Encrypted output uses `8 + 4` spacing by default:
 
 ```text
 $65A58ECF CED9
 ```
 
-The optional **Group encrypted 4-4-4** setting changes the same line to:
+Optional grouped output:
 
 ```text
 $65A5 8ECF CED9
 ```
 
-Compact 12-hex input remains accepted.
+Compact 12-character input remains accepted.
 
 </details>
 
 ---
 
 <details>
-<summary><strong>🧠 Type 6 Structured Lengths</strong></summary>
+<summary><strong>🧠 Xploder Type 5</strong></summary>
 
 <br>
 
-Type 6 stores two payload bytes directly beside the breakpoint mask. The header size field counts the payload bytes that follow those two inline bytes:
+Xploder Type 5 is a mass-write payload format and is not the same as the GameShark Type 5 serial repeater.
+
+A canonical RAW Type 5 block:
+
+```text
+$501E4FDC 0018
+$2F667574 7572
+$652F636F 6E73
+$6F6C652F 6465
+$7369676E 2F00
+```
+
+`0018` means exactly 24 payload bytes, or four six-byte rows.
+
+After payload decryption, each row is converted from loader byte order to conventional RAW code order:
+
+```text
+AC080004 0008  ->  040008AC 0800
+AABBCCDD EEFF  ->  DDCCBBAA FFEE
+```
+
+The same self-inverse transformation is applied before encryption.
+
+The converter keeps loader-only expanded sizes internal and exports the canonical external RAW size.
+
+</details>
+
+---
+
+<details>
+<summary><strong>🧠 Xploder Type 6</strong></summary>
+
+<br>
+
+Type 6 is a breakpoint/bootstrap structure.
+
+The size field counts payload bytes after the first two payload bytes stored beside the breakpoint mask:
 
 ```text
 totalPayloadBytes = sizeField + 2
@@ -130,42 +485,262 @@ sourceRows = ceil((0x0A + totalPayloadBytes) / 6)
 
 Examples:
 
-- `000C` means 14 total payload bytes and four source rows.
-- `003F` means 65 total stored payload bytes and thirteen source rows.
-- `0000` still carries the two inline payload bytes.
+```text
+000C -> 14 payload bytes, 4 source rows
+003F -> 65 stored payload bytes, 13 source rows
+0000 -> 2 inline payload bytes, 2 source rows
+```
 
-The original Type 6 header value is preserved in canonical RAW output.
+The original external size field is preserved in RAW output.
+
+A Type 5 header following Type 6 is parsed as the next structured block, not as Type 6 payload.
+
+Context-aware annotations identify:
+
+- breakpoint descriptor
+- breakpoint type
+- breakpoint mask
+- payload-byte ranges
+- final-row padding
+- embedded records inside Type 6 data
+
+Rows inside Type 6 are not reclassified only because their first digit resembles another code type.
 
 </details>
 
 ---
 
 <details>
-<summary><strong>📁 Project Layout</strong></summary>
+<summary><strong>📁 Folder Drag-and-Drop Batch Processing</strong></summary>
 
 <br>
 
-Expected folder layout:
+Drop a folder onto the Input pane to recursively process every `.txt` file.
+
+The batch process:
+
+- creates a `Decrypted` folder
+- preserves filenames
+- mirrors subfolders
+- skips existing `Decrypted` folders
+- normalizes supported code-line layouts
+- decrypts supported Xploder codes
+- preserves DuckStation 8+8 rows
+- preserves wildcard templates
+- cleans names, credits, and metadata
+- displays current file, completed count, total count, and percentage
+- temporarily disables conflicting controls
+
+Folder processing uses the dedicated Xploder database cleanup/decrypt path.
+
+It does **not** use the Input Type or Output Type selectors.
+
+The **CMP DB Compatible Output** option is still honored.
+
+Recognized layouts include:
 
 ```text
-build.cmd
-src/
-  XploderConverterGui.cpp
-  XploderCmpConverter.hpp
-  XploderMemoryCryptEngine.hpp
-  XploderConverterGui.rc
-  resource.h
-  XploderNeonX.ico
+XXXXXXXX XXXX
+XXXXXXXX XX
+XXXXXXXX XXXXXXXX
+XXXX-XXXX-XXXX
+XXXX XXXX XXXX
+compact 10, 12, or 16-character rows
 ```
 
-The build script outputs the EXE beside the `.cmd` file.
-
-Example outputs:
+DuckStation 8+8 rows are preserved:
 
 ```text
-XploderConverterGui-Win32.exe
-XploderConverterGui-Win64.exe
+9006D9D8 EF6FF7C8
+A701E7F0 00882000
+D7200000 00000004
 ```
+
+Wildcard values are supported:
+
+```text
+9000C03C 240B????
+9000C020 240A00??
+9000C03C ????????
+```
+
+</details>
+
+---
+
+<details>
+<summary><strong>⌨️ Clipboard, Shortcuts, and Editors</strong></summary>
+
+<br>
+
+Supported shortcuts:
+
+```text
+Ctrl+A = Select all
+Ctrl+C = Copy
+Ctrl+V = Paste into Input
+```
+
+Input paste normalizes:
+
+- Windows `CRLF`
+- Unix `LF`
+- old-style `CR`
+- browser/chat separators
+- Unicode line separators
+- Unicode paragraph separators
+
+The custom paste path prevents duplicate insertion and keeps pasted multiline text on separate lines.
+
+The Output pane remains read-only.
+
+The divider between Input and Output can be dragged. The divider position previews while dragging, then both panes resize cleanly when released.
+
+</details>
+
+---
+
+<details>
+<summary><strong>⚙️ Persistent Options Menu</strong></summary>
+
+<br>
+
+The first menu-bar item is:
+
+```text
+Options
+```
+
+### Program Options
+
+```text
+Auto Convert
+Annotate Code Types (Xploder)
+CMP DB Compatible Output
+```
+
+### Hide Buttons
+
+```text
+Hide Convert
+Hide Copy Output
+Hide Output -> Input
+Hide Clear
+```
+
+### Current Output
+
+The submenu changes based on the selected Output Type.
+
+#### Xploder Encrypted
+
+```text
+Group Encrypted 4-4-4
+
+Encryption Key
+  Key 4 / WHBX
+  Key 5 / WB123
+  Key 6 / AB+XOR
+  Key 7 / FCD!
+
+Type 5 Payload Key
+  Key 6
+  Key 7
+```
+
+#### GameShark / Action Replay
+
+```text
+Auto CodeType Conversion
+  Condense Writes -> Type 5
+```
+
+#### DuckStation
+
+```text
+Auto CodeType Conversion
+  80 + 80 -> 90
+  D0 / 70 -> C0 Block
+  Condense Writes -> Type 5
+```
+
+#### Caetla
+
+```text
+Auto CodeType Conversion
+  Condense Writes -> Type 5
+```
+
+#### Xploder RAW
+
+No output-specific settings are required.
+
+Settings are saved beside the executable:
+
+```text
+XploderConverter.ini
+```
+
+Persisted values include:
+
+- Input Type
+- Output Type
+- Auto Convert
+- annotation state
+- CMP output state
+- encryption key
+- Type 5 payload key
+- automatic code-type conversion options
+- hidden-button selections
+
+When no settings file exists, built-in defaults are used.
+
+### In-place selection
+
+Checkable and radio-style menu items update without closing the active menu.
+
+The complete menu path remains open and stationary:
+
+```text
+Options > Current Output > Auto CodeType Conversion
+```
+
+Checkmarks refresh immediately on the same click.
+
+Hide Buttons selections are applied after the menu is dismissed so layout changes do not interfere with native menu tracking.
+
+</details>
+
+---
+
+<details>
+<summary><strong>🧱 Modular Code-Type Files</strong></summary>
+
+<br>
+
+Each code family has its own parser/emitter module:
+
+```text
+src/CodeTypeCommon.hpp
+src/GameSharkActionReplayCodeTypes.hpp
+src/XploderCodeTypes.hpp
+src/DuckStationCodeTypes.hpp
+src/CaetlaCodeTypes.hpp
+src/MultiFormatCodeConverter.hpp
+```
+
+This keeps device-specific meanings separate.
+
+It is especially important for prefixes such as:
+
+```text
+10
+11
+20
+21
+```
+
+because their meanings differ between Caetla and GameShark / Action Replay.
 
 </details>
 
@@ -176,207 +751,71 @@ XploderConverterGui-Win64.exe
 
 <br>
 
-This project is intended to build with **Microsoft Visual C++ / MSVC**.
+The project is intended to build with **Microsoft Visual C++ / MSVC**.
 
-From a normal Command Prompt, run:
+Run:
 
 ```bat
 build.cmd
 ```
 
-The script can prompt for the target build:
+Choose:
 
 ```text
 1. Win32 / x86
 2. Win64 / x64
 ```
 
-You can also pass the target directly:
+Or pass the target directly:
 
 ```bat
 build.cmd win32
-```
-
-```bat
 build.cmd win64
 ```
 
-The script attempts to locate and initialize the Visual Studio Developer Command Prompt environment automatically.
-
-If you are already inside a Visual Studio Developer Command Prompt, the script should build directly.
+The script attempts to locate and initialize the Visual Studio Developer Command Prompt automatically.
 
 </details>
 
 ---
 
 <details>
-<summary><strong>▶️ Usage</strong></summary>
+<summary><strong>▶️ Basic Usage</strong></summary>
 
 <br>
 
 1. Open `XploderConverterGui.exe`.
-2. Paste code text into the Input pane, or drop one text file directly onto it.
-3. Choose decrypt or encrypt mode.
-4. Select the desired key style when encrypting.
-5. Copy the converted output from the output box.
+2. Select the Input Type.
+3. Select the Output Type.
+4. Paste code text into Input or drop one text file.
+5. Configure output-specific options under `Options > Current Output`.
+6. Convert the code.
+7. Copy the result from Output.
 
-When **Auto Convert** is enabled, a dropped file is converted immediately after it is loaded. Only one file or one folder is accepted per drop, with a 64 MB safety limit for each text file.
-
-### Folder batch decrypt
-
-Drop a folder onto the Input pane to process all `.txt` files in that folder and its subfolders. The batch always uses decrypt mode and performs this cleanup before decryption:
-
-```text
-Infinite Health
-by Code Master,
-35b4-0db4-cece
-```
-
-becomes:
-
-```text
-+Infinite Health
-%Credits: Code Master
-$300B4FE5 0001
-```
-
-The cleanup stage changes hyphen-grouped `4-4-4`, space-grouped `4 4 4`, compact 12-hex, and existing `8 + 4` code lines into uppercase `$XXXXXXXX XXXX` form. RAW byte-write shorthand with a two-character value is also recognized in `8 + 2`, compact 10-hex, `4-4-2`, and `4 4 2` layouts; for example, `3007DE60 00` becomes `$3007DE60 00`. Wildcard template values containing `?` are recognized in two- or four-character form. For example, `700FB57E??` becomes `$700FB57E ??`, `700FB57E????` becomes `$700FB57E ????`, and `8007 8448 ????` becomes `$80078448 ????`.
-
-DuckStation extended codes using an 8-hex address plus an 8-character value are detected separately and preserved instead of being sent through Xploder decryption. Examples include `$9006D9D8 EF6FF7C8`, `$A701E7F0 00882000`, and `$D7200000 00000004`. The value field may contain wildcards, such as `$9000C03C 240B????` or `$9000C020 240A00??`. These rows are uppercased and given a leading `$`, but their 8 + 8 layout and value remain unchanged. Compact 16-character DuckStation rows are also accepted.
-
-These rows are recognized before plain-name prefixing, so they do not receive an incorrect leading `+`. Wildcard Xploder template rows are formatted but are not decrypted because their value is intentionally unknown. CMP metadata directives such as `^3 = NAME:` and `^2 = GameID:` remain unprefixed. The inline `by Author` portion is moved to `%Credits:` between the code name and first hex line, while the original `Crypt:` section remains attached to the code name. Results are written automatically to a `Decrypted` folder using the same filenames. Subfolder layouts are mirrored, and an existing `Decrypted` folder is skipped during scanning.
-
-Example encrypted input:
-
-```text
-$35B40DB4CECE
-```
-
-Example decrypted output:
-
-```text
-$300B4FE5 0001
-```
+When **Auto Convert** is enabled, the output updates automatically after supported input changes.
 
 </details>
 
 ---
 
 <details>
-<summary><strong>🧠 Xploder Type 5 and Type 6 Notes</strong></summary>
+<summary><strong>⚠️ Format Notes</strong></summary>
 
 <br>
 
-Version 1.02 separates the external RAW format from the loader's internal runtime representation.
-
-### Type 5 external RAW size
-
-An encrypted/public Type 5 header can contain the payload key in the high nibble of its size word. After decryption, the converter exports a keyless RAW header whose value is the exact number of following payload bytes:
-
-```text
-Public/decrypted header:  $50007800 607C
-Canonical external RAW:   $50007800 007C
-Loader-internal value:    $50007800 0082
-```
-
-Only `007C` is written to decrypted RAW output. The loader-only `+0x06` value is kept internal.
-
-A standalone RAW Type 5 example:
-
-```text
-$501E4FDC 0018
-$2F667574 7572
-$652F636F 6E73
-$6F6C652F 6465
-$7369676E 2F00
-```
-
-`0018` means exactly 24 following payload bytes, which is four six-byte rows.
-
-After payload decryption, Type 5 rows are converted from loader byte order to conventional RAW code order by reversing the 32-bit address word and 16-bit value word independently:
-
-```text
-AC080004 0008  ->  040008AC 0800
-AABBCCDD EEFF  ->  DDCCBBAA FFEE
-```
-
-The same self-inverse operation is applied before payload encryption, preserving exact round trips.
-
-### Type 6 external RAW size
-
-Type 6 is a breakpoint/bootstrap structure. Its external `nnnn` field counts the payload bytes that come **after** the first two payload bytes stored beside the breakpoint mask:
-
-```text
-actual payload bytes = nnnn + 2
-```
-
-The following rows also contain ten descriptor bytes: a six-byte break-address/type record and a four-byte break mask. The first two payload bytes share the second descriptor row.
-
-The converter therefore consumes:
-
-```text
-payload bytes = size field + 2
-source bytes  = payload bytes + 0x0A
-source rows   = ceil(source bytes / 6)
-```
-
-Examples:
-
-```text
-$60FCD000 000C  -> 0x0E payload bytes, 0x18 source bytes, 4 rows
-$60000000 003F  -> 0x41 payload bytes, 0x4B source bytes, 13 rows
-$60000000 0000  -> 0x02 payload bytes, 0x0C source bytes, 2 rows
-```
-
-For the `000C` example, the complete final six-byte payload record `$90007612 AC08` remains inside Type 6. For the Rayman `003F` example, the 64-byte MIPS routine is followed by one stored zero byte before the final three row-padding bytes. The loader may internally expand the Type 6 value by `0x12`, but v1.02 keeps that runtime value internal. Decrypted RAW output retains the original field (`000C`, `003F`, and so on) exactly.
-
-### Type 6 followed by Type 5
-
-A Type 5 header that follows a Type 6 block is parsed as the next complete block, not as an embedded Type 6 payload row:
-
-```text
-$60FCD000 000C
-... four Type 6 source rows ...
-$50007610 00B0
-... 0xB0 bytes of Type 5 payload ...
-```
-
-This distinction fixes RAW → encrypted → RAW round trips and prevents the converter from changing `000C` to `001E`, changing `00B0` to `00B6`, or processing already-RAW payload bytes a second time.
-
-### Context-aware Type 6 annotations
-
-When **Annotate code types** is enabled, the rows following a Type 6 header are interpreted using the Type 6 block layout rather than by their first hexadecimal digit. The annotation identifies the breakpoint descriptor, mask, payload ranges, and final padding.
+Matching hexadecimal prefixes do not always have matching meanings across devices.
 
 For example:
 
 ```text
-$90007612 AC08	// Type 6 payload bytes 0008-000C | paddingBytes=1 | leading nibble 9 is structured Type 6 data, not a standalone code type
+GameShark Type 5 serial repeater
+≠
+Xploder Type 5 mass-write payload
 ```
 
-Although this row starts with `9`, it remains part of the Type 6 byte stream. It is not a standalone Type 9 conditional.
+Caetla supports many standard GameShark / Action Replay codes, but some Caetla-specific prefixes conflict with GameShark meanings.
 
-</details>
-
----
-
-<details>
-<summary><strong>⚠️ Important Format Notes</strong></summary>
-
-<br>
-
-This project is focused on **Xploder / Xplorer-style PSX codes**.
-
-GameShark and CodeBreaker may share some runtime concepts, but their public code formats are not always the same.
-
-In particular:
-
-```text
-GameShark public Type 5 / 50-style serial code ≠ Xploder Type 5
-```
-
-GameShark public `50`-style codes are generally serial / slider / repeater-style codes.
-
-Xploder Type 5 is handled as a mass-write / payload-style structure.
+The converter therefore keeps the selected Input Type explicit and uses family-specific parsers.
 
 </details>
 
@@ -387,26 +826,19 @@ Xploder Type 5 is handled as a mass-write / payload-style structure.
 
 <br>
 
-Special thanks to:
+### misfire
 
-### misfire  
 GitHub: https://github.com/mlafeldt
 
-Thank you for the original `xpcrypt` work and for the long-standing contributions to the PlayStation cheat and hacking scene.
-
-That research helped preserve important knowledge about Xploder / Xplorer-style code encryption and made later verification, documentation, and tooling work much easier to build upon.
+Thank you for the original `xpcrypt` work and for long-standing contributions to the PlayStation cheat and hacking scene.
 
 ### Parasyte
 
-Thank you for your contributions to the PlayStation hacking and cheat-code scene.
-
-The tools, notes, discoveries, and community work from early scene researchers continue to help people understand how these devices, code formats, and cheat engines work.
+Thank you for contributions to the PlayStation hacking and cheat-code community.
 
 ### Scene and Preservation Community
 
-This project builds on the broader work of the PlayStation cheat-code community.
-
-The goal is to preserve, document, and improve tooling for research, restoration, conversion, and compatibility.
+This project builds on the broader work of researchers who documented, tested, preserved, and shared knowledge about PlayStation cheat devices and code formats.
 
 </details>
 
@@ -432,11 +864,7 @@ No commercial cheat database, game content, BIOS, ROM, or copyrighted game mater
 
 This project is licensed under the **GNU General Public License v3.0**.
 
-See the repository `LICENSE` file for the full license text.
-
-```text
-GNU General Public License v3.0
-```
+See the repository `LICENSE` file for the complete license text.
 
 </details>
 
@@ -444,13 +872,6 @@ GNU General Public License v3.0
 
 <div align="center">
 
-**Xploder PSX Converter v1.02**
+**Xploder PSX Converter v1.03**
 
 </div>
-
-
-### Folder batch progress
-
-- A progress bar appears while a dropped folder is processed.
-- The status line shows the current file, completed-file count, total count, and percentage.
-- Conversion controls are temporarily disabled until the batch finishes.

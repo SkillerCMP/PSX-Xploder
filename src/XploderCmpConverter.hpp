@@ -39,7 +39,9 @@ namespace xploder_converter
         Mode mode = Mode::Decrypt;
         xploder_psx::Key encryptionKey = xploder_psx::Key::Key5;
         int massWritePayloadKey = 6;
-        bool prefixPlainNames = true;
+        // Controls CMP presentation only: + names, %Credits extraction, and
+        // $ prefixes on hexadecimal rows. It does not change code semantics.
+        bool outputCmpDbCompatible = true;
         bool groupEncryptedOutput = false;
         bool annotateCodeTypes = false;
     };
@@ -772,13 +774,52 @@ namespace xploder_converter
     }
 
     // Folder-drop cleanup performed before the normal decrypt pass. This does
-    // not define a new conversion format: it only normalizes textual code lines
-    // and author metadata into the converter's standard CMP-style input.
-    inline std::string normalizeBatchDecryptInput(const std::string& input)
+    // not define a new conversion format: it normalizes textual code lines and,
+    // when requested, applies CMP-style author metadata before decryption.
+    inline std::string normalizeBatchDecryptInput(
+        const std::string& input,
+        bool outputCmpDbCompatible = true)
     {
         const std::vector<std::string> lines = splitLines(input);
         std::vector<std::string> output;
         output.reserve(lines.size());
+
+        // Plain-output mode keeps code names and author text exactly in their
+        // normal readable form. It still normalizes code spacing/case for the
+        // decrypt engine, but deliberately does not add '+', create %Credits:,
+        // or retain the CMP '$' marker.
+        if (!outputCmpDbCompatible)
+        {
+            for (const std::string& original : lines)
+            {
+                std::string metadata;
+                if (tryNormalizeBatchMetadataLine(original, metadata))
+                {
+                    output.push_back(metadata);
+                    continue;
+                }
+
+                std::string code;
+                if (tryNormalizeBatchCodeLine(original, code))
+                {
+                    if (!code.empty() && code.front() == '$')
+                        code.erase(code.begin());
+                    output.push_back(std::move(code));
+                    continue;
+                }
+
+                output.push_back(original);
+            }
+
+            std::ostringstream joined;
+            for (std::size_t i = 0; i < output.size(); ++i)
+            {
+                if (i != 0)
+                    joined << '\n';
+                joined << output[i];
+            }
+            return joined.str();
+        }
 
         std::vector<std::string> pendingCredits;
         bool inCodeRun = false;
@@ -856,6 +897,204 @@ namespace xploder_converter
 
         for (const std::string& pending : pendingCredits)
             output.push_back(pending);
+
+        std::ostringstream joined;
+        for (std::size_t i = 0; i < output.size(); ++i)
+        {
+            if (i != 0)
+                joined << '\n';
+            joined << output[i];
+        }
+        return joined.str();
+    }
+
+    inline bool isOutputMetadataOrCommentLine(std::string_view line)
+    {
+        const std::string text = trim(line);
+        if (text.empty())
+            return true;
+
+        if (startsWith(text, "!!") || text[0] == '!' || text[0] == '^' ||
+            text[0] == ';' || startsWith(text, "//") || text[0] == '[')
+        {
+            return true;
+        }
+
+        return startsWithIgnoreCase(text, "Type =") ||
+               startsWithIgnoreCase(text, "Activation =") ||
+               startsWithIgnoreCase(text, "Description =") ||
+               startsWithIgnoreCase(text, "Author =") ||
+               startsWithIgnoreCase(text, "OptionRange =") ||
+               startsWithIgnoreCase(text, "ERROR:") ||
+               startsWithIgnoreCase(text, "WARNING:");
+    }
+
+    // Extract an inline author from a normal code-name line while retaining an
+    // optional trailing `, Crypt: ...` section on the title. Unlike the older
+    // folder helper, this also supports ordinary `Name by Author` lines that do
+    // not contain Crypt metadata.
+    inline bool trySplitOutputInlineCreditLine(
+        std::string_view line,
+        std::string& title,
+        std::string& normalizedCredit)
+    {
+        title.clear();
+        normalizedCredit.clear();
+
+        std::string text = trim(line);
+        if (text.empty())
+            return false;
+        if (text.front() == '+')
+            text = trim(std::string_view(text).substr(1));
+        if (text.empty() || isOutputMetadataOrCommentLine(text))
+            return false;
+
+        std::string ignoredCode;
+        if (tryNormalizeBatchCodeLine(text, ignoredCode))
+            return false;
+
+        const std::size_t cryptPosition = findIgnoreCase(text, "crypt:");
+        std::size_t authorLimit = cryptPosition == std::string_view::npos
+            ? text.size()
+            : cryptPosition;
+
+        // If Crypt metadata is present, exclude its preceding comma and spaces
+        // from the author field while keeping that suffix on the title.
+        std::size_t cryptSuffixStart = std::string_view::npos;
+        if (cryptPosition != std::string_view::npos)
+        {
+            cryptSuffixStart = cryptPosition;
+            while (cryptSuffixStart > 0U &&
+                   std::isspace(static_cast<unsigned char>(text[cryptSuffixStart - 1U])))
+            {
+                --cryptSuffixStart;
+            }
+            if (cryptSuffixStart > 0U && text[cryptSuffixStart - 1U] == ',')
+            {
+                --cryptSuffixStart;
+                while (cryptSuffixStart > 0U &&
+                       std::isspace(static_cast<unsigned char>(text[cryptSuffixStart - 1U])))
+                {
+                    --cryptSuffixStart;
+                }
+            }
+            authorLimit = cryptSuffixStart;
+        }
+
+        const std::size_t bySpacePosition = rfindIgnoreCase(text, " by ", authorLimit);
+        const std::size_t byColonPosition = rfindIgnoreCase(text, " by:", authorLimit);
+
+        std::size_t byPosition = std::string_view::npos;
+        std::size_t authorStart = 0U;
+        if (bySpacePosition != std::string_view::npos &&
+            (byColonPosition == std::string_view::npos || bySpacePosition > byColonPosition))
+        {
+            byPosition = bySpacePosition;
+            authorStart = byPosition + 4U;
+        }
+        else if (byColonPosition != std::string_view::npos)
+        {
+            byPosition = byColonPosition;
+            authorStart = byPosition + 4U;
+        }
+        else
+        {
+            return false;
+        }
+
+        std::string author = trim(std::string_view(text).substr(
+            authorStart, authorLimit - authorStart));
+        while (!author.empty() && (author.back() == ',' || author.back() == ';'))
+        {
+            author.pop_back();
+            author = trim(author);
+        }
+
+        const std::string name = trim(std::string_view(text).substr(0, byPosition));
+        if (name.empty() || author.empty())
+            return false;
+
+        title = name;
+        if (cryptSuffixStart != std::string_view::npos)
+        {
+            const std::string cryptSuffix = trim(
+                std::string_view(text).substr(cryptSuffixStart));
+            if (!cryptSuffix.empty())
+                title += " " + cryptSuffix;
+        }
+
+        normalizedCredit = "%Credits: " + author;
+        return true;
+    }
+
+    // Final output-style pass shared by direct Xploder conversion, all editor
+    // code-family emitters, and folder batch output. Semantic conversion is
+    // complete before this runs; this function changes only CMP DB presentation.
+    inline std::string applyOutputCmpDbFormatting(
+        const std::string& input,
+        bool outputCmpDbCompatible)
+    {
+        const std::vector<std::string> lines = splitLines(input);
+        std::vector<std::string> output;
+        output.reserve(lines.size() + 8U);
+
+        for (const std::string& original : lines)
+        {
+            const std::string text = trim(original);
+            if (text.empty())
+            {
+                output.push_back({});
+                continue;
+            }
+
+            std::string normalizedCode;
+            if (tryNormalizeBatchCodeLine(text, normalizedCode))
+            {
+                std::string body = text;
+                if (!body.empty() && body.front() == '$')
+                    body = trim(std::string_view(body).substr(1));
+                output.push_back(outputCmpDbCompatible ? "$" + body : body);
+                continue;
+            }
+
+            // Existing comments, game metadata, DuckStation section fields,
+            // and other structural directives are not code names.
+            if (isOutputMetadataOrCommentLine(text))
+            {
+                output.push_back(text);
+                continue;
+            }
+
+            // Credit-only lines are normalized only when CMP DB mode is on.
+            std::string normalizedCredit;
+            if (outputCmpDbCompatible &&
+                tryNormalizeBatchCreditLine(text, normalizedCredit))
+            {
+                output.push_back(normalizedCredit);
+                continue;
+            }
+
+            std::string plainName = text;
+            if (!plainName.empty() && plainName.front() == '+')
+                plainName = trim(std::string_view(plainName).substr(1));
+
+            if (!outputCmpDbCompatible)
+            {
+                output.push_back(plainName);
+                continue;
+            }
+
+            std::string title;
+            if (trySplitOutputInlineCreditLine(plainName, title, normalizedCredit))
+            {
+                output.push_back("+" + title);
+                output.push_back(normalizedCredit);
+            }
+            else
+            {
+                output.push_back("+" + plainName);
+            }
+        }
 
         std::ostringstream joined;
         for (std::size_t i = 0; i < output.size(); ++i)
@@ -1716,7 +1955,7 @@ namespace xploder_converter
         if (convertCodeBody(t, options, converted))
             return "$" + converted;
 
-        return options.prefixPlainNames ? "+" + t : t;
+        return options.outputCmpDbCompatible ? "+" + t : t;
     }
 
     inline std::string convertText(const std::string& input, const Options& options)
@@ -1759,6 +1998,7 @@ namespace xploder_converter
             out << convertLine(lines[i], options);
         }
 
-        return out.str();
+        return applyOutputCmpDbFormatting(
+            out.str(), options.outputCmpDbCompatible);
     }
 }

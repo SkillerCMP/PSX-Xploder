@@ -29,7 +29,7 @@
 #include <string_view>
 #include <vector>
 
-#include "XploderCmpConverter.hpp"
+#include "MultiFormatCodeConverter.hpp"
 
 #if __has_include("resource.h")
 #include "resource.h"
@@ -47,19 +47,23 @@ namespace
     constexpr wchar_t WindowClassName[] = L"XploderPsxConverterGuiWindow";
     constexpr wchar_t SplitterClassName[] = L"XploderPsxConverterSplitter";
     constexpr wchar_t AppTitle[] = L"Xploder PSX Converter";
-    constexpr wchar_t AppVersion[] = L"v1.02";
-    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.02";
+    constexpr wchar_t AppVersion[] = L"v1.03";
+    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.03";
 
     enum ControlId : int
     {
         IdInputEdit = 1001,
         IdOutputEdit,
-        IdModeCombo,
+        IdInputTypeCombo,
+        IdOutputTypeCombo,
         IdKeyCombo,
         IdPayloadKeyCombo,
         IdGroupCheck,
         IdAnnotateCheck,
-        IdPrefixCheck,
+        IdCmpOutputCheck,
+        IdDuckStationCombineCheck,
+        IdDuckStationCondenseCheck,
+        IdSerialRepeaterCondenseCheck,
         IdAutoCheck,
         IdConvertButton,
         IdCopyButton,
@@ -70,15 +74,43 @@ namespace
         IdStatusLabel
     };
 
+    enum MenuId : int
+    {
+        IdMenuAutoConvert = 3001,
+        IdMenuAnnotateCodeTypes,
+        IdMenuCmpDbCompatible,
+
+        IdMenuHideConvert,
+        IdMenuHideCopyOutput,
+        IdMenuHideOutputToInput,
+        IdMenuHideClear,
+
+        IdMenuGroupEncrypted,
+        IdMenuEncryptionKey4,
+        IdMenuEncryptionKey5,
+        IdMenuEncryptionKey6,
+        IdMenuEncryptionKey7,
+        IdMenuPayloadKey6,
+        IdMenuPayloadKey7,
+
+        IdMenuDuckStationCombine,
+        IdMenuDuckStationCondense,
+        IdMenuSerialRepeaterCondense
+    };
+
     HWND g_mainWindow = nullptr;
     HWND g_inputEdit = nullptr;
     HWND g_outputEdit = nullptr;
-    HWND g_modeCombo = nullptr;
+    HWND g_inputTypeCombo = nullptr;
+    HWND g_outputTypeCombo = nullptr;
     HWND g_keyCombo = nullptr;
     HWND g_payloadKeyCombo = nullptr;
     HWND g_groupCheck = nullptr;
     HWND g_annotateCheck = nullptr;
-    HWND g_prefixCheck = nullptr;
+    HWND g_cmpOutputCheck = nullptr;
+    HWND g_duckStationCombineCheck = nullptr;
+    HWND g_duckStationCondenseCheck = nullptr;
+    HWND g_serialRepeaterCondenseCheck = nullptr;
     HWND g_autoCheck = nullptr;
     HWND g_convertButton = nullptr;
     HWND g_copyButton = nullptr;
@@ -89,11 +121,29 @@ namespace
     HWND g_splitter = nullptr;
     HWND g_inputLabel = nullptr;
     HWND g_outputLabel = nullptr;
+    HMENU g_menuBar = nullptr;
+    HMENU g_optionsMenu = nullptr;
+    HMENU g_programOptionsMenu = nullptr;
+    HMENU g_hideButtonsMenu = nullptr;
+    HMENU g_currentOutputMenu = nullptr;
+    HMENU g_encryptionKeyMenu = nullptr;
+    HMENU g_payloadKeyMenu = nullptr;
+    HMENU g_autoConversionMenu = nullptr;
+
+    HHOOK g_optionsMenuMessageHook = nullptr;
+    HMENU g_selectedMenu = nullptr;
+    UINT g_selectedMenuItem = 0U;
+    UINT g_selectedMenuFlags = 0U;
     HFONT g_uiFont = nullptr;
     bool g_isConverting = false;
     bool g_isLoadingInput = false;
     bool g_isDraggingSplitter = false;
     bool g_isBatchDecrypting = false;
+    bool g_hideConvertButton = false;
+    bool g_hideCopyButton = false;
+    bool g_hideSwapButton = false;
+    bool g_hideClearButton = false;
+    bool g_pendingButtonVisibilityUpdate = false;
     double g_splitRatio = 0.5;
 
     constexpr int LayoutMargin = 10;
@@ -104,6 +154,15 @@ namespace
     void layoutPaneControls(HWND hwnd, bool repaintImmediately);
     void convertNow();
     void updateModeUi();
+    void updateOptionsMenu();
+    void refreshOptionsMenuChecksOnly();
+    bool handleOptionsMenuCommand(int id, bool preserveOpenMenus);
+    bool isOptionsMenuCommand(int id);
+    int selectedKeyboardMenuCommand();
+    void redrawOpenPopupMenusImmediately();
+    LRESULT CALLBACK optionsMenuMessageFilter(int code, WPARAM wParam, LPARAM lParam);
+    void savePersistentSettings();
+    psx_code_types::Family selectedFamily(HWND combo);
     bool batchDecryptFolder(const std::wstring& folderPath);
     void setBatchUiActive(bool active);
     void updateBatchProgress(std::size_t completed, std::size_t total, const std::wstring& currentFile);
@@ -179,7 +238,11 @@ namespace
                 continue;
             }
 
-            if (ch == L'\n')
+            // Browser/chat clipboard text can use LF-only or Unicode line separators.
+            if (ch == L'\n' || ch == L'\v' || ch == L'\f' ||
+                ch == static_cast<wchar_t>(0x0085) ||
+                ch == static_cast<wchar_t>(0x2028) ||
+                ch == static_cast<wchar_t>(0x2029))
             {
                 out.push_back(L'\r');
                 out.push_back(L'\n');
@@ -195,6 +258,91 @@ namespace
     void setEditText(HWND hwnd, const std::wstring& text)
     {
         setWindowText(hwnd, normalizeLineEndingsForEdit(text));
+    }
+
+    bool pasteNormalizedClipboardText(HWND hwnd)
+    {
+        if (!OpenClipboard(hwnd))
+            return false;
+
+        std::wstring clipboardText;
+
+        if (HANDLE unicodeHandle = GetClipboardData(CF_UNICODETEXT))
+        {
+            const auto* unicodeText = static_cast<const wchar_t*>(GlobalLock(unicodeHandle));
+            if (unicodeText != nullptr)
+            {
+                clipboardText.assign(unicodeText);
+                GlobalUnlock(unicodeHandle);
+            }
+        }
+        else if (HANDLE ansiHandle = GetClipboardData(CF_TEXT))
+        {
+            const auto* ansiText = static_cast<const char*>(GlobalLock(ansiHandle));
+            if (ansiText != nullptr)
+            {
+                const int needed = MultiByteToWideChar(CP_ACP, 0, ansiText, -1, nullptr, 0);
+                if (needed > 1)
+                {
+                    std::wstring converted(static_cast<std::size_t>(needed), L'\0');
+                    MultiByteToWideChar(CP_ACP, 0, ansiText, -1, converted.data(), needed);
+                    converted.resize(static_cast<std::size_t>(needed - 1));
+                    clipboardText = converted;
+                }
+                GlobalUnlock(ansiHandle);
+            }
+        }
+
+        CloseClipboard();
+
+        if (clipboardText.empty())
+            return false;
+
+        const std::wstring normalized = normalizeLineEndingsForEdit(clipboardText);
+        SendMessageW(hwnd, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(normalized.c_str()));
+        return true;
+    }
+
+    bool handleEditShortcut(HWND hwnd, UINT msg, WPARAM wParam, bool allowPaste)
+    {
+        if (msg != WM_KEYDOWN || (GetKeyState(VK_CONTROL) & 0x8000) == 0)
+            return false;
+
+        switch (wParam)
+        {
+            case L'A':
+                SendMessageW(hwnd, EM_SETSEL, 0, -1);
+                return true;
+
+            case L'C':
+                SendMessageW(hwnd, WM_COPY, 0, 0);
+                return true;
+
+            case L'V':
+                if (allowPaste)
+                {
+                    // Insert the normalized clipboard text directly. Sending WM_PASTE
+                    // here and then allowing TranslateMessage's Ctrl+V WM_CHAR (0x16)
+                    // to reach the EDIT control can make the same text paste twice.
+                    pasteNormalizedClipboardText(hwnd);
+                    return true;
+                }
+                break;
+        }
+
+        return false;
+    }
+
+    bool isHandledEditShortcutCharacter(UINT msg, WPARAM wParam)
+    {
+        if (msg != WM_CHAR)
+            return false;
+
+        // TranslateMessage still posts these control characters even when the
+        // corresponding WM_KEYDOWN was handled by our editor subclass.
+        return wParam == 0x01U || // Ctrl+A
+               wParam == 0x03U || // Ctrl+C
+               wParam == 0x16U;   // Ctrl+V
     }
 
     bool readDroppedFileBytes(
@@ -355,13 +503,27 @@ namespace
     {
         g_isBatchDecrypting = active;
 
+        if (g_menuBar != nullptr)
+        {
+            EnableMenuItem(
+                g_menuBar,
+                0,
+                MF_BYPOSITION | (active ? MF_GRAYED : MF_ENABLED));
+            if (g_mainWindow != nullptr)
+                DrawMenuBar(g_mainWindow);
+        }
+
         const BOOL enabled = active ? FALSE : TRUE;
-        EnableWindow(g_modeCombo, enabled);
+        EnableWindow(g_inputTypeCombo, enabled);
+        EnableWindow(g_outputTypeCombo, enabled);
         EnableWindow(g_keyCombo, enabled);
         EnableWindow(g_payloadKeyCombo, enabled);
         EnableWindow(g_groupCheck, enabled);
         EnableWindow(g_annotateCheck, enabled);
-        EnableWindow(g_prefixCheck, enabled);
+        EnableWindow(g_cmpOutputCheck, enabled);
+        EnableWindow(g_duckStationCombineCheck, enabled);
+        EnableWindow(g_duckStationCondenseCheck, enabled);
+        EnableWindow(g_serialRepeaterCondenseCheck, enabled);
         EnableWindow(g_autoCheck, enabled);
         EnableWindow(g_convertButton, enabled);
         EnableWindow(g_copyButton, enabled);
@@ -481,6 +643,477 @@ namespace
         return static_cast<int>(SendMessageW(hwnd, CB_GETCURSEL, 0, 0));
     }
 
+    void setChecked(HWND hwnd, bool checked)
+    {
+        if (hwnd != nullptr)
+            SendMessageW(hwnd, BM_SETCHECK, checked ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
+    void toggleChecked(HWND hwnd)
+    {
+        setChecked(hwnd, !isChecked(hwnd));
+    }
+
+    std::wstring settingsFilePath()
+    {
+        std::vector<wchar_t> modulePath(32768U, L'\0');
+        const DWORD copied = GetModuleFileNameW(
+            nullptr,
+            modulePath.data(),
+            static_cast<DWORD>(modulePath.size()));
+
+        if (copied == 0U || copied >= modulePath.size())
+            return L"XploderConverter.ini";
+
+        std::filesystem::path path(std::wstring(modulePath.data(), copied));
+        path.replace_filename(L"XploderConverter.ini");
+        return path.wstring();
+    }
+
+    int readSettingInt(const wchar_t* key, int defaultValue)
+    {
+        const std::wstring path = settingsFilePath();
+        return static_cast<int>(GetPrivateProfileIntW(L"Settings", key, defaultValue, path.c_str()));
+    }
+
+    void writeSettingInt(const wchar_t* key, int value)
+    {
+        const std::wstring path = settingsFilePath();
+        const std::wstring text = std::to_wstring(value);
+        WritePrivateProfileStringW(L"Settings", key, text.c_str(), path.c_str());
+    }
+
+    int clampedComboSetting(const wchar_t* key, int defaultValue, int maximumIndex)
+    {
+        return std::clamp(readSettingInt(key, defaultValue), 0, maximumIndex);
+    }
+
+    void loadPersistentSettings()
+    {
+        SendMessageW(g_inputTypeCombo, CB_SETCURSEL, clampedComboSetting(L"InputType", 1, 4), 0);
+        SendMessageW(g_outputTypeCombo, CB_SETCURSEL, clampedComboSetting(L"OutputType", 2, 4), 0);
+        SendMessageW(g_keyCombo, CB_SETCURSEL, clampedComboSetting(L"EncryptionKey", 1, 3), 0);
+        SendMessageW(g_payloadKeyCombo, CB_SETCURSEL, clampedComboSetting(L"PayloadKey", 0, 1), 0);
+
+        setChecked(g_groupCheck, readSettingInt(L"GroupEncrypted444", 0) != 0);
+        setChecked(g_annotateCheck, readSettingInt(L"AnnotateCodeTypes", 0) != 0);
+        setChecked(g_cmpOutputCheck, readSettingInt(L"CmpDbCompatible", 1) != 0);
+        setChecked(g_autoCheck, readSettingInt(L"AutoConvert", 0) != 0);
+        setChecked(g_duckStationCombineCheck, readSettingInt(L"DuckStationCombine80", 0) != 0);
+        setChecked(g_duckStationCondenseCheck, readSettingInt(L"DuckStationCondenseD0", 0) != 0);
+        setChecked(g_serialRepeaterCondenseCheck, readSettingInt(L"CondenseSerialRepeater", 0) != 0);
+
+        g_hideConvertButton = readSettingInt(L"HideConvertButton", 0) != 0;
+        g_hideCopyButton = readSettingInt(L"HideCopyOutputButton", 0) != 0;
+        g_hideSwapButton = readSettingInt(L"HideOutputToInputButton", 0) != 0;
+        g_hideClearButton = readSettingInt(L"HideClearButton", 0) != 0;
+    }
+
+    void savePersistentSettings()
+    {
+        if (g_inputTypeCombo == nullptr)
+            return;
+
+        writeSettingInt(L"InputType", comboIndex(g_inputTypeCombo));
+        writeSettingInt(L"OutputType", comboIndex(g_outputTypeCombo));
+        writeSettingInt(L"EncryptionKey", comboIndex(g_keyCombo));
+        writeSettingInt(L"PayloadKey", comboIndex(g_payloadKeyCombo));
+        writeSettingInt(L"GroupEncrypted444", isChecked(g_groupCheck) ? 1 : 0);
+        writeSettingInt(L"AnnotateCodeTypes", isChecked(g_annotateCheck) ? 1 : 0);
+        writeSettingInt(L"CmpDbCompatible", isChecked(g_cmpOutputCheck) ? 1 : 0);
+        writeSettingInt(L"AutoConvert", isChecked(g_autoCheck) ? 1 : 0);
+        writeSettingInt(L"DuckStationCombine80", isChecked(g_duckStationCombineCheck) ? 1 : 0);
+        writeSettingInt(L"DuckStationCondenseD0", isChecked(g_duckStationCondenseCheck) ? 1 : 0);
+        writeSettingInt(L"CondenseSerialRepeater", isChecked(g_serialRepeaterCondenseCheck) ? 1 : 0);
+        writeSettingInt(L"HideConvertButton", g_hideConvertButton ? 1 : 0);
+        writeSettingInt(L"HideCopyOutputButton", g_hideCopyButton ? 1 : 0);
+        writeSettingInt(L"HideOutputToInputButton", g_hideSwapButton ? 1 : 0);
+        writeSettingInt(L"HideClearButton", g_hideClearButton ? 1 : 0);
+    }
+
+    void checkMenuItemState(HMENU menu, UINT id, bool checked)
+    {
+        if (menu == nullptr)
+            return;
+        CheckMenuItem(menu, id, MF_BYCOMMAND | (checked ? MF_CHECKED : MF_UNCHECKED));
+    }
+
+    void clearMenu(HMENU menu)
+    {
+        if (menu == nullptr)
+            return;
+        while (GetMenuItemCount(menu) > 0)
+            DeleteMenu(menu, 0, MF_BYPOSITION);
+    }
+
+    void appendDisabledMenuText(HMENU menu, const wchar_t* text)
+    {
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, 0U, text);
+    }
+
+    void rebuildCurrentOutputMenu()
+    {
+        if (g_currentOutputMenu == nullptr || g_outputTypeCombo == nullptr)
+            return;
+
+        g_encryptionKeyMenu = nullptr;
+        g_payloadKeyMenu = nullptr;
+        g_autoConversionMenu = nullptr;
+        clearMenu(g_currentOutputMenu);
+        const psx_code_types::Family outputFamily = selectedFamily(g_outputTypeCombo);
+
+        if (outputFamily == psx_code_types::Family::XploderEncrypted)
+        {
+            AppendMenuW(g_currentOutputMenu, MF_STRING, IdMenuGroupEncrypted, L"Group Encrypted 4-4-4");
+            AppendMenuW(g_currentOutputMenu, MF_SEPARATOR, 0U, nullptr);
+
+            g_encryptionKeyMenu = CreatePopupMenu();
+            HMENU encryptionKeyMenu = g_encryptionKeyMenu;
+            AppendMenuW(encryptionKeyMenu, MF_STRING, IdMenuEncryptionKey4, L"Key 4 / WHBX");
+            AppendMenuW(encryptionKeyMenu, MF_STRING, IdMenuEncryptionKey5, L"Key 5 / WB123");
+            AppendMenuW(encryptionKeyMenu, MF_STRING, IdMenuEncryptionKey6, L"Key 6 / AB+XOR");
+            AppendMenuW(encryptionKeyMenu, MF_STRING, IdMenuEncryptionKey7, L"Key 7 / FCD!");
+            AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(encryptionKeyMenu), L"Encryption Key");
+
+            g_payloadKeyMenu = CreatePopupMenu();
+            HMENU payloadKeyMenu = g_payloadKeyMenu;
+            AppendMenuW(payloadKeyMenu, MF_STRING, IdMenuPayloadKey6, L"Key 6");
+            AppendMenuW(payloadKeyMenu, MF_STRING, IdMenuPayloadKey7, L"Key 7");
+            AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(payloadKeyMenu), L"Type 5 Payload Key");
+
+            checkMenuItemState(g_currentOutputMenu, IdMenuGroupEncrypted, isChecked(g_groupCheck));
+            CheckMenuRadioItem(
+                encryptionKeyMenu,
+                IdMenuEncryptionKey4,
+                IdMenuEncryptionKey7,
+                IdMenuEncryptionKey4 + static_cast<UINT>(std::clamp(comboIndex(g_keyCombo), 0, 3)),
+                MF_BYCOMMAND);
+            CheckMenuRadioItem(
+                payloadKeyMenu,
+                IdMenuPayloadKey6,
+                IdMenuPayloadKey7,
+                comboIndex(g_payloadKeyCombo) == 1 ? IdMenuPayloadKey7 : IdMenuPayloadKey6,
+                MF_BYCOMMAND);
+        }
+        else if (outputFamily == psx_code_types::Family::GameSharkActionReplay ||
+                 outputFamily == psx_code_types::Family::Caetla)
+        {
+            g_autoConversionMenu = CreatePopupMenu();
+            HMENU conversionMenu = g_autoConversionMenu;
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuSerialRepeaterCondense, L"Condense Writes -> Type 5");
+            checkMenuItemState(conversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
+            AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(conversionMenu), L"Auto CodeType Conversion");
+        }
+        else if (outputFamily == psx_code_types::Family::DuckStation)
+        {
+            g_autoConversionMenu = CreatePopupMenu();
+            HMENU conversionMenu = g_autoConversionMenu;
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuDuckStationCombine, L"80 + 80 -> 90");
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuDuckStationCondense, L"D0 / 70 -> C0 Block");
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuSerialRepeaterCondense, L"Condense Writes -> Type 5");
+            checkMenuItemState(conversionMenu, IdMenuDuckStationCombine, isChecked(g_duckStationCombineCheck));
+            checkMenuItemState(conversionMenu, IdMenuDuckStationCondense, isChecked(g_duckStationCondenseCheck));
+            checkMenuItemState(conversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
+            AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(conversionMenu), L"Auto CodeType Conversion");
+        }
+        else
+        {
+            appendDisabledMenuText(g_currentOutputMenu, L"No output-specific options");
+        }
+    }
+
+    void applyButtonVisibility()
+    {
+        if (g_convertButton != nullptr)
+            ShowWindow(g_convertButton, g_hideConvertButton ? SW_HIDE : SW_SHOW);
+        if (g_copyButton != nullptr)
+            ShowWindow(g_copyButton, g_hideCopyButton ? SW_HIDE : SW_SHOW);
+        if (g_swapButton != nullptr)
+            ShowWindow(g_swapButton, g_hideSwapButton ? SW_HIDE : SW_SHOW);
+        if (g_clearButton != nullptr)
+            ShowWindow(g_clearButton, g_hideClearButton ? SW_HIDE : SW_SHOW);
+    }
+
+    void updateOptionsMenu()
+    {
+        rebuildCurrentOutputMenu();
+        refreshOptionsMenuChecksOnly();
+        applyButtonVisibility();
+        if (g_mainWindow != nullptr)
+        {
+            DrawMenuBar(g_mainWindow);
+            layoutControls(g_mainWindow);
+        }
+    }
+
+    bool isOptionsMenuCommand(int id)
+    {
+        return id == IdMenuAutoConvert || id == IdMenuAnnotateCodeTypes || id == IdMenuCmpDbCompatible ||
+               id == IdMenuHideConvert || id == IdMenuHideCopyOutput ||
+               id == IdMenuHideOutputToInput || id == IdMenuHideClear ||
+               id == IdMenuGroupEncrypted ||
+               (id >= IdMenuEncryptionKey4 && id <= IdMenuEncryptionKey7) ||
+               id == IdMenuPayloadKey6 || id == IdMenuPayloadKey7 ||
+               id == IdMenuDuckStationCombine || id == IdMenuDuckStationCondense ||
+               id == IdMenuSerialRepeaterCondense;
+    }
+
+    void refreshOptionsMenuChecksOnly()
+    {
+        checkMenuItemState(g_programOptionsMenu, IdMenuAutoConvert, isChecked(g_autoCheck));
+        checkMenuItemState(g_programOptionsMenu, IdMenuAnnotateCodeTypes, isChecked(g_annotateCheck));
+        checkMenuItemState(g_programOptionsMenu, IdMenuCmpDbCompatible, isChecked(g_cmpOutputCheck));
+
+        checkMenuItemState(g_hideButtonsMenu, IdMenuHideConvert, g_hideConvertButton);
+        checkMenuItemState(g_hideButtonsMenu, IdMenuHideCopyOutput, g_hideCopyButton);
+        checkMenuItemState(g_hideButtonsMenu, IdMenuHideOutputToInput, g_hideSwapButton);
+        checkMenuItemState(g_hideButtonsMenu, IdMenuHideClear, g_hideClearButton);
+
+        checkMenuItemState(g_currentOutputMenu, IdMenuGroupEncrypted, isChecked(g_groupCheck));
+        checkMenuItemState(g_autoConversionMenu, IdMenuDuckStationCombine, isChecked(g_duckStationCombineCheck));
+        checkMenuItemState(g_autoConversionMenu, IdMenuDuckStationCondense, isChecked(g_duckStationCondenseCheck));
+        checkMenuItemState(g_autoConversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
+
+        if (g_encryptionKeyMenu != nullptr)
+        {
+            CheckMenuRadioItem(
+                g_encryptionKeyMenu,
+                IdMenuEncryptionKey4,
+                IdMenuEncryptionKey7,
+                IdMenuEncryptionKey4 + static_cast<UINT>(std::clamp(comboIndex(g_keyCombo), 0, 3)),
+                MF_BYCOMMAND);
+        }
+        if (g_payloadKeyMenu != nullptr)
+        {
+            CheckMenuRadioItem(
+                g_payloadKeyMenu,
+                IdMenuPayloadKey6,
+                IdMenuPayloadKey7,
+                comboIndex(g_payloadKeyCombo) == 1 ? IdMenuPayloadKey7 : IdMenuPayloadKey6,
+                MF_BYCOMMAND);
+        }
+
+    }
+
+    bool handleOptionsMenuCommand(int id, bool preserveOpenMenus)
+    {
+        if (!isOptionsMenuCommand(id))
+            return false;
+
+        bool runConversion = false;
+        bool layoutChanged = false;
+
+        if (id == IdMenuAutoConvert)
+        {
+            toggleChecked(g_autoCheck);
+            runConversion = isChecked(g_autoCheck);
+        }
+        else if (id == IdMenuAnnotateCodeTypes || id == IdMenuCmpDbCompatible)
+        {
+            toggleChecked(id == IdMenuAnnotateCodeTypes ? g_annotateCheck : g_cmpOutputCheck);
+            runConversion = isChecked(g_autoCheck);
+        }
+        else if (id == IdMenuHideConvert || id == IdMenuHideCopyOutput ||
+                 id == IdMenuHideOutputToInput || id == IdMenuHideClear)
+        {
+            if (id == IdMenuHideConvert)
+                g_hideConvertButton = !g_hideConvertButton;
+            else if (id == IdMenuHideCopyOutput)
+                g_hideCopyButton = !g_hideCopyButton;
+            else if (id == IdMenuHideOutputToInput)
+                g_hideSwapButton = !g_hideSwapButton;
+            else
+                g_hideClearButton = !g_hideClearButton;
+            layoutChanged = true;
+        }
+        else if (id == IdMenuGroupEncrypted || id == IdMenuDuckStationCombine ||
+                 id == IdMenuDuckStationCondense || id == IdMenuSerialRepeaterCondense)
+        {
+            HWND target = g_groupCheck;
+            if (id == IdMenuDuckStationCombine)
+                target = g_duckStationCombineCheck;
+            else if (id == IdMenuDuckStationCondense)
+                target = g_duckStationCondenseCheck;
+            else if (id == IdMenuSerialRepeaterCondense)
+                target = g_serialRepeaterCondenseCheck;
+
+            toggleChecked(target);
+            runConversion = isChecked(g_autoCheck);
+        }
+        else if (id >= IdMenuEncryptionKey4 && id <= IdMenuEncryptionKey7)
+        {
+            SendMessageW(g_keyCombo, CB_SETCURSEL, id - IdMenuEncryptionKey4, 0);
+            runConversion = isChecked(g_autoCheck);
+        }
+        else if (id == IdMenuPayloadKey6 || id == IdMenuPayloadKey7)
+        {
+            SendMessageW(g_payloadKeyCombo, CB_SETCURSEL, id == IdMenuPayloadKey7 ? 1 : 0, 0);
+            runConversion = isChecked(g_autoCheck);
+        }
+
+        if (preserveOpenMenus)
+            refreshOptionsMenuChecksOnly();
+        else
+            updateOptionsMenu();
+
+        if (layoutChanged && g_mainWindow != nullptr)
+        {
+            if (preserveOpenMenus)
+            {
+                // Showing or hiding child controls while the native popup menu is
+                // processing the same click can disturb its mouse tracking. Keep
+                // the checkmark update immediate, but wait until the menu loop
+                // closes before applying the button visibility/layout change.
+                g_pendingButtonVisibilityUpdate = true;
+            }
+            else
+            {
+                applyButtonVisibility();
+                layoutControls(g_mainWindow);
+                g_pendingButtonVisibilityUpdate = false;
+            }
+        }
+
+        savePersistentSettings();
+        if (runConversion)
+            convertNow();
+
+        return true;
+    }
+
+    bool menuCommandFromMenuPosition(HMENU menu, int position, int& commandId)
+    {
+        if (menu == nullptr || position < 0)
+            return false;
+
+        MENUITEMINFOW item{};
+        item.cbSize = sizeof(item);
+        item.fMask = MIIM_ID | MIIM_FTYPE | MIIM_STATE | MIIM_SUBMENU;
+        if (GetMenuItemInfoW(menu, static_cast<UINT>(position), TRUE, &item) == FALSE)
+            return false;
+        if (item.hSubMenu != nullptr || (item.fType & MFT_SEPARATOR) != 0U ||
+            (item.fState & (MFS_DISABLED | MFS_GRAYED)) != 0U)
+            return false;
+        if (!isOptionsMenuCommand(static_cast<int>(item.wID)))
+            return false;
+
+        commandId = static_cast<int>(item.wID);
+        return true;
+    }
+
+    bool menuCommandAtPoint(POINT point, int& commandId)
+    {
+        // WM_MENUSELECT already tells us which exact popup and row Windows has
+        // highlighted. Prefer that active menu instead of searching every menu
+        // handle, because inactive popup menus can retain stale rectangles which
+        // overlap the left/checkmark side of another submenu.
+        if (g_selectedMenu != nullptr)
+        {
+            const int position = MenuItemFromPoint(g_mainWindow, g_selectedMenu, point);
+            if (menuCommandFromMenuPosition(g_selectedMenu, position, commandId))
+                return true;
+
+            const int selectedId = selectedKeyboardMenuCommand();
+            if (selectedId != 0)
+            {
+                commandId = selectedId;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    int selectedKeyboardMenuCommand()
+    {
+        if (g_selectedMenu == nullptr ||
+            (g_selectedMenuFlags & (MF_POPUP | MF_SEPARATOR | MF_DISABLED | MF_GRAYED)) != 0U)
+            return 0;
+
+        const int id = static_cast<int>(g_selectedMenuItem);
+        return isOptionsMenuCommand(id) ? id : 0;
+    }
+
+    BOOL CALLBACK redrawPopupMenuWindow(HWND hwnd, LPARAM)
+    {
+        wchar_t className[32]{};
+        constexpr int classNameLength = static_cast<int>(sizeof(className) / sizeof(className[0]));
+        if (GetClassNameW(hwnd, className, classNameLength) <= 0 ||
+            lstrcmpW(className, L"#32768") != 0 || IsWindowVisible(hwnd) == FALSE)
+        {
+            return TRUE;
+        }
+
+        // Native popup menus cache the highlighted row until another mouse move.
+        // Force every open popup in the current menu chain to repaint now so the
+        // new check/radio state is visible on the same click that changed it.
+        RedrawWindow(
+            hwnd,
+            nullptr,
+            nullptr,
+            RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        return TRUE;
+    }
+
+    void redrawOpenPopupMenusImmediately()
+    {
+        EnumThreadWindows(GetCurrentThreadId(), redrawPopupMenuWindow, 0);
+    }
+
+    LRESULT CALLBACK optionsMenuMessageFilter(int code, WPARAM wParam, LPARAM lParam)
+    {
+        if (code == MSGF_MENU && lParam != 0)
+        {
+            MSG* message = reinterpret_cast<MSG*>(lParam);
+            int commandId = 0;
+
+            if (message->message == WM_LBUTTONUP && menuCommandAtPoint(message->pt, commandId))
+            {
+                if (handleOptionsMenuCommand(commandId, true))
+                {
+                    redrawOpenPopupMenusImmediately();
+                    return 1;
+                }
+            }
+            else if (message->message == WM_KEYDOWN &&
+                     (message->wParam == VK_RETURN || message->wParam == VK_SPACE))
+            {
+                commandId = selectedKeyboardMenuCommand();
+                if (commandId != 0 && handleOptionsMenuCommand(commandId, true))
+                {
+                    redrawOpenPopupMenusImmediately();
+                    return 1;
+                }
+            }
+        }
+
+        return CallNextHookEx(g_optionsMenuMessageHook, code, wParam, lParam);
+    }
+
+    void createOptionsMenu(HWND hwnd)
+    {
+        g_menuBar = CreateMenu();
+        g_optionsMenu = CreatePopupMenu();
+        g_programOptionsMenu = CreatePopupMenu();
+        g_hideButtonsMenu = CreatePopupMenu();
+        g_currentOutputMenu = CreatePopupMenu();
+
+        AppendMenuW(g_programOptionsMenu, MF_STRING, IdMenuAutoConvert, L"Auto Convert");
+        AppendMenuW(g_programOptionsMenu, MF_STRING, IdMenuAnnotateCodeTypes, L"Annotate Code Types (Xploder)");
+        AppendMenuW(g_programOptionsMenu, MF_STRING, IdMenuCmpDbCompatible, L"CMP DB Compatible Output");
+
+        AppendMenuW(g_hideButtonsMenu, MF_STRING, IdMenuHideConvert, L"Hide Convert");
+        AppendMenuW(g_hideButtonsMenu, MF_STRING, IdMenuHideCopyOutput, L"Hide Copy Output");
+        AppendMenuW(g_hideButtonsMenu, MF_STRING, IdMenuHideOutputToInput, L"Hide Output -> Input");
+        AppendMenuW(g_hideButtonsMenu, MF_STRING, IdMenuHideClear, L"Hide Clear");
+
+        AppendMenuW(g_optionsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_programOptionsMenu), L"Program Options");
+        AppendMenuW(g_optionsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_hideButtonsMenu), L"Hide Buttons");
+        AppendMenuW(g_optionsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_currentOutputMenu), L"Current Output");
+        AppendMenuW(g_menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_optionsMenu), L"Options");
+        SetMenu(hwnd, g_menuBar);
+    }
+
     bool loadDroppedTextFile(const std::wstring& path)
     {
         std::vector<std::uint8_t> bytes;
@@ -526,6 +1159,18 @@ namespace
         UINT_PTR subclassId,
         DWORD_PTR)
     {
+        if (msg == WM_PASTE)
+        {
+            if (pasteNormalizedClipboardText(hwnd))
+                return 0;
+        }
+
+        if (handleEditShortcut(hwnd, msg, wParam, true))
+            return 0;
+
+        if (isHandledEditShortcutCharacter(msg, wParam))
+            return 0;
+
         if (msg == WM_DROPFILES)
         {
             HDROP drop = reinterpret_cast<HDROP>(wParam);
@@ -575,6 +1220,26 @@ namespace
         return DefSubclassProc(hwnd, msg, wParam, lParam);
     }
 
+    LRESULT CALLBACK outputEditSubclassProc(
+        HWND hwnd,
+        UINT msg,
+        WPARAM wParam,
+        LPARAM lParam,
+        UINT_PTR subclassId,
+        DWORD_PTR)
+    {
+        if (handleEditShortcut(hwnd, msg, wParam, false))
+            return 0;
+
+        if (isHandledEditShortcutCharacter(msg, wParam))
+            return 0;
+
+        if (msg == WM_NCDESTROY)
+            RemoveWindowSubclass(hwnd, outputEditSubclassProc, subclassId);
+
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+
     xploder_psx::Key selectedEncryptionKey()
     {
         switch (comboIndex(g_keyCombo))
@@ -587,20 +1252,44 @@ namespace
         }
     }
 
+    psx_code_types::Family selectedFamily(HWND combo)
+    {
+        switch (comboIndex(combo))
+        {
+            case 0: return psx_code_types::Family::GameSharkActionReplay;
+            case 1: return psx_code_types::Family::XploderEncrypted;
+            case 2: return psx_code_types::Family::XploderRaw;
+            case 3: return psx_code_types::Family::DuckStation;
+            case 4: return psx_code_types::Family::Caetla;
+            default: return psx_code_types::Family::XploderRaw;
+        }
+    }
+
     xploder_converter::Options selectedOptions()
     {
         xploder_converter::Options options;
-        options.mode = comboIndex(g_modeCombo) == 1
-            ? xploder_converter::Mode::Encrypt
-            : xploder_converter::Mode::Decrypt;
+        // Mode is selected internally by the window conversion coordinator.
+        // Folder drop explicitly forces Decrypt and never reads the family selectors.
+        options.mode = xploder_converter::Mode::Decrypt;
         options.encryptionKey = selectedEncryptionKey();
         options.massWritePayloadKey = comboIndex(g_payloadKeyCombo) == 1 ? 7 : 6;
         options.groupEncryptedOutput = isChecked(g_groupCheck);
         options.annotateCodeTypes = isChecked(g_annotateCheck);
-        options.prefixPlainNames = isChecked(g_prefixCheck);
+        options.outputCmpDbCompatible = isChecked(g_cmpOutputCheck);
         return options;
     }
 
+    psx_code_types::WindowConversionOptions selectedWindowOptions()
+    {
+        psx_code_types::WindowConversionOptions options;
+        options.inputFamily = selectedFamily(g_inputTypeCombo);
+        options.outputFamily = selectedFamily(g_outputTypeCombo);
+        options.combineDuckStation16BitWrites = isChecked(g_duckStationCombineCheck);
+        options.condenseDuckStationActivators = isChecked(g_duckStationCondenseCheck);
+        options.condenseBasicSerialRepeaters = isChecked(g_serialRepeaterCondenseCheck);
+        options.xploderOptions = selectedOptions();
+        return options;
+    }
 
     bool equalsIgnoreCase(const std::wstring& left, const std::wstring& right)
     {
@@ -814,7 +1503,8 @@ namespace
             {
                 const std::string sourceUtf8 = narrowUtf8(decoded);
                 const std::string normalized =
-                    xploder_converter::normalizeBatchDecryptInput(sourceUtf8);
+                    xploder_converter::normalizeBatchDecryptInput(
+                        sourceUtf8, options.outputCmpDbCompatible);
                 const std::string decrypted =
                     xploder_converter::convertText(normalized, options);
 
@@ -885,13 +1575,20 @@ namespace
 
     void updateModeUi()
     {
-        const bool encrypt = comboIndex(g_modeCombo) == 1;
-        EnableWindow(g_keyCombo, encrypt ? TRUE : FALSE);
-        EnableWindow(g_groupCheck, encrypt ? TRUE : FALSE);
-        // The selected Type 5 payload key is used when encrypting every
-        // external RAW Type 5 block, including one immediately after Type 6.
-        // Decrypt reads the key from the encrypted Type 5 public header.
-        EnableWindow(g_payloadKeyCombo, encrypt ? TRUE : FALSE);
+        // Output-specific settings are exposed through Options > Current Output.
+        // The legacy child controls remain as hidden state holders so the
+        // conversion core and folder batch path keep using the same options.
+        ShowWindow(g_keyCombo, SW_HIDE);
+        ShowWindow(g_payloadKeyCombo, SW_HIDE);
+        ShowWindow(g_groupCheck, SW_HIDE);
+        ShowWindow(g_annotateCheck, SW_HIDE);
+        ShowWindow(g_cmpOutputCheck, SW_HIDE);
+        ShowWindow(g_autoCheck, SW_HIDE);
+        ShowWindow(g_duckStationCombineCheck, SW_HIDE);
+        ShowWindow(g_duckStationCondenseCheck, SW_HIDE);
+        ShowWindow(g_serialRepeaterCondenseCheck, SW_HIDE);
+
+        updateOptionsMenu();
     }
 
     void convertNow()
@@ -904,12 +1601,13 @@ namespace
         {
             const std::wstring inputWide = getWindowText(g_inputEdit);
             const std::string inputUtf8 = narrowUtf8(inputWide);
-            const xploder_converter::Options options = selectedOptions();
-            const std::string outputUtf8 = xploder_converter::convertText(inputUtf8, options);
+            const psx_code_types::WindowConversionOptions options = selectedWindowOptions();
+            const std::string outputUtf8 = psx_code_types::convertWindowText(inputUtf8, options);
             setEditText(g_outputEdit, widenUtf8(outputUtf8));
 
-            const wchar_t* mode = options.mode == xploder_converter::Mode::Encrypt ? L"Encrypt" : L"Decrypt";
-            setStatus(std::wstring(L"Done: ") + mode + L" conversion complete.");
+            const std::wstring inputName = widenUtf8(psx_code_types::familyName(options.inputFamily));
+            const std::wstring outputName = widenUtf8(psx_code_types::familyName(options.outputFamily));
+            setStatus(L"Done: " + inputName + L" -> " + outputName + L" conversion complete.");
         }
         catch (const std::exception& ex)
         {
@@ -964,7 +1662,12 @@ namespace
     {
         const std::wstring output = getWindowText(g_outputEdit);
         setEditText(g_inputEdit, output);
-        setStatus(L"Output moved to input.");
+        const int outputTypeIndex = comboIndex(g_outputTypeCombo);
+        if (outputTypeIndex >= 0)
+            SendMessageW(g_inputTypeCombo, CB_SETCURSEL, static_cast<WPARAM>(outputTypeIndex), 0);
+        updateModeUi();
+        savePersistentSettings();
+        setStatus(L"Output moved to input; Input Type now matches the previous Output Type.");
         if (isChecked(g_autoCheck))
             convertNow();
     }
@@ -997,7 +1700,7 @@ namespace
         const int height = rc.bottom - rc.top;
         const int margin = LayoutMargin;
         const int top = 10;
-        const int controlsH = 76;
+        const int controlsH = 86;
         const int labelH = 20;
         const int statusH = 24;
         const int progressH = 18;
@@ -1208,35 +1911,29 @@ namespace
         const int progressH = 18;
         const int progressGap = 6;
 
+        constexpr int familyComboWidth = 240;
         int x = margin;
         int y = top;
-        const int comboW = 210;
 
-        MoveWindow(g_modeCombo, x, y + 18, comboW, 200, TRUE);
+        MoveWindow(g_inputTypeCombo, x, y + 4, familyComboWidth, 220, TRUE);
+        x += familyComboWidth + gap;
+        MoveWindow(g_outputTypeCombo, x, y + 4, familyComboWidth, 220, TRUE);
 
-        x += comboW + gap;
-        MoveWindow(g_keyCombo, x, y + 18, 150, 200, TRUE);
-        x += 150 + gap;
-        MoveWindow(g_payloadKeyCombo, x, y + 18, 220, 200, TRUE);
-        x += 220 + gap;
-        MoveWindow(g_convertButton, x, y + 16, 90, 28, TRUE);
-        x += 94;
-        MoveWindow(g_copyButton, x, y + 16, 105, 28, TRUE);
-        x += 109;
-        MoveWindow(g_swapButton, x, y + 16, 115, 28, TRUE);
-        x += 119;
-        MoveWindow(g_clearButton, x, y + 16, 75, 28, TRUE);
-
-        // Static option labels are omitted to keep the layout simple; combo text is descriptive.
         x = margin;
-        y = top + 50;
-        MoveWindow(g_groupCheck, x, y, 190, 22, TRUE);
-        x += 200;
-        MoveWindow(g_annotateCheck, x, y, 150, 22, TRUE);
-        x += 160;
-        MoveWindow(g_prefixCheck, x, y, 175, 22, TRUE);
-        x += 185;
-        MoveWindow(g_autoCheck, x, y, 115, 22, TRUE);
+        y = top + 42;
+        const auto placeVisibleButton = [&](HWND button, int buttonWidth)
+        {
+            if (button != nullptr && IsWindowVisible(button) != FALSE)
+            {
+                MoveWindow(button, x, y, buttonWidth, 28, TRUE);
+                x += buttonWidth + gap;
+            }
+        };
+
+        placeVisibleButton(g_convertButton, 90);
+        placeVisibleButton(g_copyButton, 105);
+        placeVisibleButton(g_swapButton, 115);
+        placeVisibleButton(g_clearButton, 75);
 
         layoutPaneControls(hwnd, true);
         if (g_progressBar != nullptr && IsWindowVisible(g_progressBar) != FALSE)
@@ -1260,11 +1957,53 @@ namespace
         InitCommonControlsEx(&icc);
 
         g_uiFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        createOptionsMenu(hwnd);
 
-        g_modeCombo = createControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, IdModeCombo, hwnd);
-        addComboItem(g_modeCombo, L"Decrypt: XplorerPro/FX -> Active RAW");
-        addComboItem(g_modeCombo, L"Encrypt: Active RAW -> XplorerPro/FX");
-        SendMessageW(g_modeCombo, CB_SETCURSEL, 0, 0);
+        g_inputTypeCombo = createControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, IdInputTypeCombo, hwnd);
+        addComboItem(g_inputTypeCombo, L"Input: GameShark / Action Replay");
+        addComboItem(g_inputTypeCombo, L"Input: Xploder Encrypted");
+        addComboItem(g_inputTypeCombo, L"Input: Xploder RAW");
+        addComboItem(g_inputTypeCombo, L"Input: DuckStation");
+        addComboItem(g_inputTypeCombo, L"Input: Caetla");
+        SendMessageW(g_inputTypeCombo, CB_SETCURSEL, 1, 0);
+
+        g_outputTypeCombo = createControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, IdOutputTypeCombo, hwnd);
+        addComboItem(g_outputTypeCombo, L"Output: GameShark / Action Replay");
+        addComboItem(g_outputTypeCombo, L"Output: Xploder Encrypted");
+        addComboItem(g_outputTypeCombo, L"Output: Xploder RAW");
+        addComboItem(g_outputTypeCombo, L"Output: DuckStation");
+        addComboItem(g_outputTypeCombo, L"Output: Caetla");
+        SendMessageW(g_outputTypeCombo, CB_SETCURSEL, 2, 0);
+
+        g_duckStationCombineCheck = createControl(
+            L"BUTTON",
+            L"Combine 80 + 80 -> 90",
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            0,
+            IdDuckStationCombineCheck,
+            hwnd);
+        SendMessageW(g_duckStationCombineCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+        ShowWindow(g_duckStationCombineCheck, SW_HIDE);
+
+        g_duckStationCondenseCheck = createControl(
+            L"BUTTON",
+            L"Condense D0 -> C0 Block",
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            0,
+            IdDuckStationCondenseCheck,
+            hwnd);
+        SendMessageW(g_duckStationCondenseCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+        ShowWindow(g_duckStationCondenseCheck, SW_HIDE);
+
+        g_serialRepeaterCondenseCheck = createControl(
+            L"BUTTON",
+            L"Condense Writes -> Type 5",
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            0,
+            IdSerialRepeaterCondenseCheck,
+            hwnd);
+        SendMessageW(g_serialRepeaterCondenseCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+        ShowWindow(g_serialRepeaterCondenseCheck, SW_HIDE);
 
         g_keyCombo = createControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, IdKeyCombo, hwnd);
         addComboItem(g_keyCombo, L"Encrypt Key 4 / WHBX style");
@@ -1285,11 +2024,11 @@ namespace
 
         g_groupCheck = createControl(L"BUTTON", L"Group encrypted 4-4-4", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdGroupCheck, hwnd);
         g_annotateCheck = createControl(L"BUTTON", L"Annotate code types", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdAnnotateCheck, hwnd);
-        g_prefixCheck = createControl(L"BUTTON", L"Add + to plain names", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdPrefixCheck, hwnd);
-        SendMessageW(g_prefixCheck, BM_SETCHECK, BST_CHECKED, 0);
+        g_cmpOutputCheck = createControl(L"BUTTON", L"Output CMP DB Compatible", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdCmpOutputCheck, hwnd);
+        SendMessageW(g_cmpOutputCheck, BM_SETCHECK, BST_CHECKED, 0);
         g_autoCheck = createControl(L"BUTTON", L"Auto Convert", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdAutoCheck, hwnd);
 
-        g_inputLabel = createControl(L"STATIC", L"Input (drop a text file or folder here)", 0, 0, 0, hwnd);
+        g_inputLabel = createControl(L"STATIC", L"Input (file/folder drop; type selectors are editor-only)", 0, 0, 0, hwnd);
         g_outputLabel = createControl(L"STATIC", L"Output", 0, 0, 0, hwnd);
         g_splitter = createControl(SplitterClassName, L"", 0, 0, IdSplitter, hwnd);
 
@@ -1298,6 +2037,7 @@ namespace
         g_outputEdit = createControl(L"EDIT", L"", editStyle | ES_READONLY, WS_EX_CLIENTEDGE, IdOutputEdit, hwnd);
 
         SetWindowSubclass(g_inputEdit, inputEditSubclassProc, 1U, 0);
+        SetWindowSubclass(g_outputEdit, outputEditSubclassProc, 1U, 0);
         DragAcceptFiles(g_inputEdit, TRUE);
 
         SendMessageW(g_inputEdit, EM_SETLIMITTEXT, 0, 0);
@@ -1314,6 +2054,7 @@ namespace
 
         g_statusLabel = createControl(L"STATIC", L"Ready.", 0, 0, IdStatusLabel, hwnd);
 
+        loadPersistentSettings();
         updateModeUi();
         layoutControls(hwnd);
     }
@@ -1336,6 +2077,9 @@ namespace
                 const int id = LOWORD(wParam);
                 const int notify = HIWORD(wParam);
 
+                if (handleOptionsMenuCommand(id, false))
+                    return 0;
+
                 if (id == IdConvertButton && notify == BN_CLICKED)
                 {
                     convertNow();
@@ -1356,15 +2100,20 @@ namespace
                     swapOutputToInput();
                     return 0;
                 }
-                if ((id == IdModeCombo || id == IdKeyCombo || id == IdPayloadKeyCombo) && notify == CBN_SELCHANGE)
+                if ((id == IdInputTypeCombo || id == IdOutputTypeCombo || id == IdKeyCombo || id == IdPayloadKeyCombo) && notify == CBN_SELCHANGE)
                 {
                     updateModeUi();
+                    savePersistentSettings();
                     if (isChecked(g_autoCheck))
                         convertNow();
                     return 0;
                 }
-                if ((id == IdGroupCheck || id == IdAnnotateCheck || id == IdPrefixCheck) && notify == BN_CLICKED)
+                if ((id == IdGroupCheck || id == IdAnnotateCheck || id == IdCmpOutputCheck ||
+                     id == IdDuckStationCombineCheck || id == IdDuckStationCondenseCheck ||
+                     id == IdSerialRepeaterCondenseCheck) && notify == BN_CLICKED)
                 {
+                    updateOptionsMenu();
+                    savePersistentSettings();
                     if (isChecked(g_autoCheck))
                         convertNow();
                     return 0;
@@ -1377,6 +2126,58 @@ namespace
                 return 0;
             }
 
+            case WM_MENUSELECT:
+                if (HIWORD(wParam) == 0xFFFFU || reinterpret_cast<HMENU>(lParam) == nullptr)
+                {
+                    g_selectedMenu = nullptr;
+                    g_selectedMenuItem = 0U;
+                    g_selectedMenuFlags = 0U;
+                }
+                else
+                {
+                    g_selectedMenu = reinterpret_cast<HMENU>(lParam);
+                    g_selectedMenuFlags = HIWORD(wParam);
+                    if ((g_selectedMenuFlags & MF_POPUP) != 0U)
+                    {
+                        const UINT position = LOWORD(wParam);
+                        g_selectedMenuItem = GetMenuItemID(g_selectedMenu, static_cast<int>(position));
+                    }
+                    else
+                    {
+                        g_selectedMenuItem = LOWORD(wParam);
+                    }
+                }
+                return 0;
+
+            case WM_ENTERMENULOOP:
+                if (g_optionsMenuMessageHook == nullptr)
+                {
+                    g_optionsMenuMessageHook = SetWindowsHookExW(
+                        WH_MSGFILTER,
+                        optionsMenuMessageFilter,
+                        nullptr,
+                        GetCurrentThreadId());
+                }
+                return 0;
+
+            case WM_EXITMENULOOP:
+                if (g_optionsMenuMessageHook != nullptr)
+                {
+                    UnhookWindowsHookEx(g_optionsMenuMessageHook);
+                    g_optionsMenuMessageHook = nullptr;
+                }
+                g_selectedMenu = nullptr;
+                g_selectedMenuItem = 0U;
+                g_selectedMenuFlags = 0U;
+
+                if (g_pendingButtonVisibilityUpdate)
+                {
+                    g_pendingButtonVisibilityUpdate = false;
+                    applyButtonVisibility();
+                    layoutControls(hwnd);
+                }
+                return 0;
+
             case WM_CLOSE:
                 if (g_isBatchDecrypting)
                 {
@@ -1384,10 +2185,16 @@ namespace
                     MessageBeep(MB_ICONWARNING);
                     return 0;
                 }
+                savePersistentSettings();
                 DestroyWindow(hwnd);
                 return 0;
 
             case WM_DESTROY:
+                if (g_optionsMenuMessageHook != nullptr)
+                {
+                    UnhookWindowsHookEx(g_optionsMenuMessageHook);
+                    g_optionsMenuMessageHook = nullptr;
+                }
                 PostQuitMessage(0);
                 return 0;
         }
