@@ -47,8 +47,8 @@ namespace
     constexpr wchar_t WindowClassName[] = L"XploderPsxConverterGuiWindow";
     constexpr wchar_t SplitterClassName[] = L"XploderPsxConverterSplitter";
     constexpr wchar_t AppTitle[] = L"Xploder PSX Converter";
-    constexpr wchar_t AppVersion[] = L"v1.03";
-    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.03";
+    constexpr wchar_t AppVersion[] = L"v1.04";
+    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.04";
 
     enum ControlId : int
     {
@@ -64,6 +64,7 @@ namespace
         IdDuckStationCombineCheck,
         IdDuckStationCondenseCheck,
         IdSerialRepeaterCondenseCheck,
+        IdMipsPackType5Check,
         IdAutoCheck,
         IdConvertButton,
         IdCopyButton,
@@ -95,7 +96,8 @@ namespace
 
         IdMenuDuckStationCombine,
         IdMenuDuckStationCondense,
-        IdMenuSerialRepeaterCondense
+        IdMenuSerialRepeaterCondense,
+        IdMenuMipsPackType5
     };
 
     HWND g_mainWindow = nullptr;
@@ -111,6 +113,7 @@ namespace
     HWND g_duckStationCombineCheck = nullptr;
     HWND g_duckStationCondenseCheck = nullptr;
     HWND g_serialRepeaterCondenseCheck = nullptr;
+    HWND g_mipsPackType5Check = nullptr;
     HWND g_autoCheck = nullptr;
     HWND g_convertButton = nullptr;
     HWND g_copyButton = nullptr;
@@ -524,6 +527,7 @@ namespace
         EnableWindow(g_duckStationCombineCheck, enabled);
         EnableWindow(g_duckStationCondenseCheck, enabled);
         EnableWindow(g_serialRepeaterCondenseCheck, enabled);
+        EnableWindow(g_mipsPackType5Check, enabled);
         EnableWindow(g_autoCheck, enabled);
         EnableWindow(g_convertButton, enabled);
         EnableWindow(g_copyButton, enabled);
@@ -690,8 +694,8 @@ namespace
 
     void loadPersistentSettings()
     {
-        SendMessageW(g_inputTypeCombo, CB_SETCURSEL, clampedComboSetting(L"InputType", 1, 4), 0);
-        SendMessageW(g_outputTypeCombo, CB_SETCURSEL, clampedComboSetting(L"OutputType", 2, 4), 0);
+        SendMessageW(g_inputTypeCombo, CB_SETCURSEL, clampedComboSetting(L"InputType", 1, 5), 0);
+        SendMessageW(g_outputTypeCombo, CB_SETCURSEL, clampedComboSetting(L"OutputType", 2, 5), 0);
         SendMessageW(g_keyCombo, CB_SETCURSEL, clampedComboSetting(L"EncryptionKey", 1, 3), 0);
         SendMessageW(g_payloadKeyCombo, CB_SETCURSEL, clampedComboSetting(L"PayloadKey", 0, 1), 0);
 
@@ -702,6 +706,7 @@ namespace
         setChecked(g_duckStationCombineCheck, readSettingInt(L"DuckStationCombine80", 0) != 0);
         setChecked(g_duckStationCondenseCheck, readSettingInt(L"DuckStationCondenseD0", 0) != 0);
         setChecked(g_serialRepeaterCondenseCheck, readSettingInt(L"CondenseSerialRepeater", 0) != 0);
+        setChecked(g_mipsPackType5Check, readSettingInt(L"MipsPackType5", 0) != 0);
 
         g_hideConvertButton = readSettingInt(L"HideConvertButton", 0) != 0;
         g_hideCopyButton = readSettingInt(L"HideCopyOutputButton", 0) != 0;
@@ -725,6 +730,7 @@ namespace
         writeSettingInt(L"DuckStationCombine80", isChecked(g_duckStationCombineCheck) ? 1 : 0);
         writeSettingInt(L"DuckStationCondenseD0", isChecked(g_duckStationCondenseCheck) ? 1 : 0);
         writeSettingInt(L"CondenseSerialRepeater", isChecked(g_serialRepeaterCondenseCheck) ? 1 : 0);
+        writeSettingInt(L"MipsPackType5", isChecked(g_mipsPackType5Check) ? 1 : 0);
         writeSettingInt(L"HideConvertButton", g_hideConvertButton ? 1 : 0);
         writeSettingInt(L"HideCopyOutputButton", g_hideCopyButton ? 1 : 0);
         writeSettingInt(L"HideOutputToInputButton", g_hideSwapButton ? 1 : 0);
@@ -781,6 +787,12 @@ namespace
             AppendMenuW(payloadKeyMenu, MF_STRING, IdMenuPayloadKey7, L"Key 7");
             AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(payloadKeyMenu), L"Type 5 Payload Key");
 
+            g_autoConversionMenu = CreatePopupMenu();
+            HMENU conversionMenu = g_autoConversionMenu;
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuMipsPackType5, L"Pack PS1 MIPS -> Type 5");
+            checkMenuItemState(conversionMenu, IdMenuMipsPackType5, isChecked(g_mipsPackType5Check));
+            AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(conversionMenu), L"Auto CodeType Conversion");
+
             checkMenuItemState(g_currentOutputMenu, IdMenuGroupEncrypted, isChecked(g_groupCheck));
             CheckMenuRadioItem(
                 encryptionKeyMenu,
@@ -814,6 +826,14 @@ namespace
             checkMenuItemState(conversionMenu, IdMenuDuckStationCombine, isChecked(g_duckStationCombineCheck));
             checkMenuItemState(conversionMenu, IdMenuDuckStationCondense, isChecked(g_duckStationCondenseCheck));
             checkMenuItemState(conversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
+            AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(conversionMenu), L"Auto CodeType Conversion");
+        }
+        else if (outputFamily == psx_code_types::Family::XploderRaw)
+        {
+            g_autoConversionMenu = CreatePopupMenu();
+            HMENU conversionMenu = g_autoConversionMenu;
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuMipsPackType5, L"Pack PS1 MIPS -> Type 5");
+            checkMenuItemState(conversionMenu, IdMenuMipsPackType5, isChecked(g_mipsPackType5Check));
             AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(conversionMenu), L"Auto CodeType Conversion");
         }
         else
@@ -855,7 +875,7 @@ namespace
                (id >= IdMenuEncryptionKey4 && id <= IdMenuEncryptionKey7) ||
                id == IdMenuPayloadKey6 || id == IdMenuPayloadKey7 ||
                id == IdMenuDuckStationCombine || id == IdMenuDuckStationCondense ||
-               id == IdMenuSerialRepeaterCondense;
+               id == IdMenuSerialRepeaterCondense || id == IdMenuMipsPackType5;
     }
 
     void refreshOptionsMenuChecksOnly()
@@ -873,6 +893,7 @@ namespace
         checkMenuItemState(g_autoConversionMenu, IdMenuDuckStationCombine, isChecked(g_duckStationCombineCheck));
         checkMenuItemState(g_autoConversionMenu, IdMenuDuckStationCondense, isChecked(g_duckStationCondenseCheck));
         checkMenuItemState(g_autoConversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
+        checkMenuItemState(g_autoConversionMenu, IdMenuMipsPackType5, isChecked(g_mipsPackType5Check));
 
         if (g_encryptionKeyMenu != nullptr)
         {
@@ -927,7 +948,8 @@ namespace
             layoutChanged = true;
         }
         else if (id == IdMenuGroupEncrypted || id == IdMenuDuckStationCombine ||
-                 id == IdMenuDuckStationCondense || id == IdMenuSerialRepeaterCondense)
+                 id == IdMenuDuckStationCondense || id == IdMenuSerialRepeaterCondense ||
+                 id == IdMenuMipsPackType5)
         {
             HWND target = g_groupCheck;
             if (id == IdMenuDuckStationCombine)
@@ -936,6 +958,8 @@ namespace
                 target = g_duckStationCondenseCheck;
             else if (id == IdMenuSerialRepeaterCondense)
                 target = g_serialRepeaterCondenseCheck;
+            else if (id == IdMenuMipsPackType5)
+                target = g_mipsPackType5Check;
 
             toggleChecked(target);
             runConversion = isChecked(g_autoCheck);
@@ -1261,6 +1285,7 @@ namespace
             case 2: return psx_code_types::Family::XploderRaw;
             case 3: return psx_code_types::Family::DuckStation;
             case 4: return psx_code_types::Family::Caetla;
+            case 5: return psx_code_types::Family::Ps1Mips;
             default: return psx_code_types::Family::XploderRaw;
         }
     }
@@ -1287,6 +1312,7 @@ namespace
         options.combineDuckStation16BitWrites = isChecked(g_duckStationCombineCheck);
         options.condenseDuckStationActivators = isChecked(g_duckStationCondenseCheck);
         options.condenseBasicSerialRepeaters = isChecked(g_serialRepeaterCondenseCheck);
+        options.packMipsAsXploderType5 = isChecked(g_mipsPackType5Check);
         options.xploderOptions = selectedOptions();
         return options;
     }
@@ -1587,6 +1613,7 @@ namespace
         ShowWindow(g_duckStationCombineCheck, SW_HIDE);
         ShowWindow(g_duckStationCondenseCheck, SW_HIDE);
         ShowWindow(g_serialRepeaterCondenseCheck, SW_HIDE);
+        ShowWindow(g_mipsPackType5Check, SW_HIDE);
 
         updateOptionsMenu();
     }
@@ -1965,6 +1992,7 @@ namespace
         addComboItem(g_inputTypeCombo, L"Input: Xploder RAW");
         addComboItem(g_inputTypeCombo, L"Input: DuckStation");
         addComboItem(g_inputTypeCombo, L"Input: Caetla");
+        addComboItem(g_inputTypeCombo, L"Input: PS1 MIPS");
         SendMessageW(g_inputTypeCombo, CB_SETCURSEL, 1, 0);
 
         g_outputTypeCombo = createControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, IdOutputTypeCombo, hwnd);
@@ -1973,6 +2001,7 @@ namespace
         addComboItem(g_outputTypeCombo, L"Output: Xploder RAW");
         addComboItem(g_outputTypeCombo, L"Output: DuckStation");
         addComboItem(g_outputTypeCombo, L"Output: Caetla");
+        addComboItem(g_outputTypeCombo, L"Output: PS1 MIPS");
         SendMessageW(g_outputTypeCombo, CB_SETCURSEL, 2, 0);
 
         g_duckStationCombineCheck = createControl(
@@ -2004,6 +2033,16 @@ namespace
             hwnd);
         SendMessageW(g_serialRepeaterCondenseCheck, BM_SETCHECK, BST_UNCHECKED, 0);
         ShowWindow(g_serialRepeaterCondenseCheck, SW_HIDE);
+
+        g_mipsPackType5Check = createControl(
+            L"BUTTON",
+            L"Pack PS1 MIPS -> Xploder Type 5",
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            0,
+            IdMipsPackType5Check,
+            hwnd);
+        SendMessageW(g_mipsPackType5Check, BM_SETCHECK, BST_UNCHECKED, 0);
+        ShowWindow(g_mipsPackType5Check, SW_HIDE);
 
         g_keyCombo = createControl(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP, 0, IdKeyCombo, hwnd);
         addComboItem(g_keyCombo, L"Encrypt Key 4 / WHBX style");

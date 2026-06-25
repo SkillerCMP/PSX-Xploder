@@ -7,6 +7,7 @@
 #include "CaetlaCodeTypes.hpp"
 #include "DuckStationCodeTypes.hpp"
 #include "XploderCodeTypes.hpp"
+#include "Ps1MipsCodeTypes.hpp"
 
 namespace psx_code_types
 {
@@ -17,6 +18,7 @@ namespace psx_code_types
         bool combineDuckStation16BitWrites = false;
         bool condenseDuckStationActivators = false;
         bool condenseBasicSerialRepeaters = false;
+        bool packMipsAsXploderType5 = false;
         xploder_converter::Options xploderOptions{};
     };
 
@@ -46,6 +48,8 @@ namespace psx_code_types
                 return parseDuckStation(input);
             case Family::Caetla:
                 return parseCaetla(input);
+            case Family::Ps1Mips:
+                return parsePs1Mips(input);
             case Family::XploderRaw:
                 return parseXploderRaw(input);
             case Family::XploderEncrypted:
@@ -71,6 +75,11 @@ namespace psx_code_types
         const WindowConversionOptions& options)
     {
         std::vector<Operation> prepared = operations;
+        if (options.packMipsAsXploderType5 &&
+            (options.outputFamily == Family::XploderRaw || options.outputFamily == Family::XploderEncrypted))
+        {
+            prepared = ps1_mips::packMipsWritesAsType5(prepared);
+        }
         const bool supportsBasicType5 =
             options.outputFamily == Family::GameSharkActionReplay ||
             options.outputFamily == Family::DuckStation ||
@@ -89,6 +98,8 @@ namespace psx_code_types
                     options.condenseDuckStationActivators));
             case Family::Caetla:
                 return joinLines(emitCaetla(prepared));
+            case Family::Ps1Mips:
+                return joinLines(emitPs1Mips(prepared));
             case Family::XploderRaw:
                 return joinLines(emitXploderRaw(prepared));
             case Family::XploderEncrypted:
@@ -138,6 +149,10 @@ namespace psx_code_types
                         converted = normalizeCaetlaText(input);
                     sameFamilyHandled = true;
                     break;
+                case Family::Ps1Mips:
+                    converted = emitSelectedFamily(parsePs1Mips(input), options);
+                    sameFamilyHandled = true;
+                    break;
                 case Family::XploderRaw:
                 {
                     xploder_converter::Options rawOptions = options.xploderOptions;
@@ -166,6 +181,9 @@ namespace psx_code_types
             }
             converted = emitSelectedFamily(operations, options);
         }
+
+        if (options.outputFamily == Family::Ps1Mips)
+            return converted;
 
         return xploder_converter::applyOutputCmpDbFormatting(
             converted,

@@ -220,6 +220,38 @@ namespace psx_code_types
         }
     }
 
+
+    inline void appendGeneratedXploderMassWrite(
+        std::vector<std::string>& lines,
+        const Operation& operation)
+    {
+        if (operation.payload.empty() || operation.payload.size() > 0xFFFFU)
+        {
+            appendUnsupported(lines, operation, "Xploder RAW", "generated Type 5 payload is empty or too large");
+            return;
+        }
+
+        lines.push_back(formatCode(
+            0x50000000U | maskedPsxAddress(operation.address),
+            hex(static_cast<std::uint32_t>(operation.payload.size()), 4)));
+
+        for (std::size_t offset = 0; offset < operation.payload.size(); offset += 6U)
+        {
+            std::array<std::uint8_t, 6> row{};
+            const std::size_t count = std::min<std::size_t>(6U, operation.payload.size() - offset);
+            for (std::size_t index = 0; index < count; ++index)
+                row[index] = operation.payload[offset + index];
+
+            std::string addressText;
+            std::string valueText;
+            for (std::size_t index = 0; index < 4U; ++index)
+                addressText += hex(row[index], 2);
+            for (std::size_t index = 4U; index < 6U; ++index)
+                valueText += hex(row[index], 2);
+            lines.push_back(formatCode(addressText, valueText));
+        }
+    }
+
     inline std::vector<std::string> emitXploderRaw(const std::vector<Operation>& operations)
     {
         std::vector<std::string> lines;
@@ -272,6 +304,25 @@ namespace psx_code_types
                     appendXploderWrite(lines, 16, operation.address, operation.value, false, operation.suffix);
                     break;
                 case OperationKind::XploderMassWrite:
+                    if (operation.sourceFamily == Family::Ps1Mips)
+                    {
+                        appendGeneratedXploderMassWrite(lines, operation);
+                    }
+                    else if (operation.sourceFamily == Family::XploderRaw || operation.sourceFamily == Family::XploderEncrypted)
+                    {
+                        for (const std::string& source : operation.sourceLines)
+                        {
+                            ParsedCodeLine parsed;
+                            lines.push_back(parseCodeLine(source, parsed)
+                                ? formatCode(parsed.addressText, parsed.valueText, parsed.suffix)
+                                : source);
+                        }
+                    }
+                    else
+                    {
+                        appendUnsupported(lines, operation, "Xploder RAW");
+                    }
+                    break;
                 case OperationKind::XploderMegaCode:
                     if (operation.sourceFamily == Family::XploderRaw || operation.sourceFamily == Family::XploderEncrypted)
                     {

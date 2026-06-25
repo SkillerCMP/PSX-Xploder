@@ -8,6 +8,13 @@ rem
 rem Expected layout:
 rem   build-gui-msvc.cmd
 rem   src\XploderConverterGui.cpp
+rem   src\MultiFormatCodeConverter.hpp
+rem   src\CodeTypeCommon.hpp
+rem   src\GameSharkActionReplayCodeTypes.hpp
+rem   src\XploderCodeTypes.hpp
+rem   src\DuckStationCodeTypes.hpp
+rem   src\CaetlaCodeTypes.hpp
+rem   src\Ps1MipsCodeTypes.hpp
 rem   src\XploderCmpConverter.hpp
 rem   src\XploderMemoryCryptEngine.hpp
 rem

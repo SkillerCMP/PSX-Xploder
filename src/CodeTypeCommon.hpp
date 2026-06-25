@@ -22,7 +22,8 @@ namespace psx_code_types
         XploderEncrypted,
         XploderRaw,
         DuckStation,
-        Caetla
+        Caetla,
+        Ps1Mips
     };
 
     enum class OperationKind
@@ -527,6 +528,7 @@ namespace psx_code_types
             case Family::XploderRaw: return "Xploder RAW";
             case Family::DuckStation: return "DuckStation";
             case Family::Caetla: return "Caetla";
+            case Family::Ps1Mips: return "PS1 MIPS";
         }
         return "Unknown";
     }

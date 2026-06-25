@@ -12,7 +12,7 @@ Xploder PSX Converter README
 ![Language](https://img.shields.io/badge/language-C%2B%2B17-blue)
 ![Build](https://img.shields.io/badge/build-MSVC-green)
 ![License](https://img.shields.io/badge/license-GPLv3-red)
-![Version](https://img.shields.io/badge/version-v1.03-brightgreen)
+![Version](https://img.shields.io/badge/version-v1.04-brightgreen)
 
 <a href="https://github.com/SkillerCMP/PSX-Xploder/releases">
   <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/SkillerCMP/PSX-Xploder/total?style=social">
@@ -35,6 +35,7 @@ Xploder Encrypted
 Xploder RAW
 DuckStation
 Caetla
+PS1 MIPS
 ```
 
 The project includes Xploder encryption/decryption, structured Type 5 and Type 6 handling, DuckStation patch metadata, CMP database formatting, folder batch cleanup, wildcard preservation, activator conversion, and code-type condensation.
@@ -52,6 +53,7 @@ The project includes Xploder encryption/decryption, structured Type 5 and Type 6
 - Canonical Xploder Type 5 and Type 6 RAW output.
 - GameShark, Action Replay, DuckStation, Caetla, and Xploder code-type translation.
 - DuckStation patch-section generation and reverse conversion.
+- PS1 MIPS I assembly, disassembly, and exact data-directive preservation.
 - Nested CMP group and subgroup support.
 - GameShark Type 5 serial-repeater condensation and expansion.
 - DuckStation `80 + 80 -> 90` write combining.
@@ -88,6 +90,7 @@ Xploder Encrypted
 Xploder RAW
 DuckStation
 Caetla
+PS1 MIPS
 ```
 
 The converter uses semantic operations instead of changing only the first hexadecimal digit.
@@ -127,6 +130,77 @@ Caetla                          DuckStation
 ```
 
 When no exact destination equivalent exists, the converter preserves the original code with a clear warning instead of silently guessing or deleting it.
+
+</details>
+
+---
+
+<details open>
+<summary><strong>🧠 PS1 MIPS Input and Output</strong></summary>
+
+<br>
+
+The Input Type and Output Type lists include:
+
+```text
+PS1 MIPS
+```
+
+When **PS1 MIPS** is selected as the Input Type, assembly is converted into the selected cheat-code family.
+
+Example input:
+
+```asm
+0x800D0A3C : Hook
+j     0x8000FF1C
+beq   $s2, $zero, 0x8000FF28
+nop
+sw    $v1, 0x0020($s3)
+j     0x800D0A44
+nop
+```
+
+The special `: Hook` form writes the first `j`/`jal` at the declared hook address, then continues assembling at that numeric jump target. For explicit control, `.org` can be used for every region.
+
+DuckStation output:
+
+```text
+900D0A3C 08003FC7
+9000FF1C 12400002
+9000FF20 00000000
+9000FF24 AE630020
+9000FF28 08034291
+9000FF2C 00000000
+```
+
+GameShark, Caetla, and Xploder output use paired 16-bit writes where required.
+
+When **PS1 MIPS** is selected as the Output Type, the converter reconstructs 32-bit opcodes from:
+
+- DuckStation Type `90` writes
+- consecutive GameShark/Caetla/Xploder Type `80` writes at `A` and `A+2`
+- canonical Xploder Type 5 payload bytes
+- Xploder Encrypted Type 5 blocks after decryption
+
+Output is organized into `.org` regions and includes calculated branch and jump targets.
+
+For Xploder RAW or Xploder Encrypted output, the optional menu item:
+
+```text
+Options > Current Output > Auto CodeType Conversion > Pack PS1 MIPS -> Type 5
+```
+
+packs each contiguous MIPS region into a canonical Xploder Type 5 payload before optional encryption.
+
+The PS1 MIPS converter supports common MIPS I integer, branch, jump, load/store, and basic COP0 instructions. Unknown, reserved, or noncanonical encodings are shown as exact `.word 0xXXXXXXXX` values so they cannot be silently normalized into different opcodes. Exact data directives are also supported:
+
+```asm
+.word 0x00FFFF00
+.half 0x1234
+.byte 0x01
+```
+
+`.half` accepts one or more comma-separated 16-bit values and stores them in PS1 little-endian byte order. Type 5 payload tails now use `.half` when two bytes remain and `.byte` when one byte remains. These directives are accepted again as MIPS input and can be packed back into an exact-length Xploder Type 5 payload. Full GTE/COP2 mnemonic support and multi-instruction pseudo-operations are not included yet.
 
 </details>
 
@@ -872,6 +946,6 @@ See the repository `LICENSE` file for the complete license text.
 
 <div align="center">
 
-**Xploder PSX Converter v1.03**
+**Xploder PSX Converter v1.04**
 
 </div>
