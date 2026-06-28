@@ -68,9 +68,6 @@ Version 1.05 validates the classic GameShark / Action Replay parser against the 
 - `Type = Assembly`, `Activation = Manual/EndFrame`, `Option`, `OptionRange`, `DisallowForAchievements`, and `Ignore` metadata are preserved during DuckStation round trips.
 - Complex DuckStation-only structures such as `51`, `52`, `D7`, `F0-F6`, and Assembly bodies are preserved verbatim when no exact cross-device translation exists.
 
-See [`GAMESHARK_PRO_3.1_CODE_TYPES.md`](GAMESHARK_PRO_3.1_CODE_TYPES.md) for the verified mapping and conversion policy.
-See [`DUCKSTATION_CODE_TYPES.md`](DUCKSTATION_CODE_TYPES.md) for the source-derived DuckStation mapping and preservation policy.
-
 </details>
 
 ---
@@ -536,7 +533,7 @@ C308C6B8 0001
 91000022 000003E8
 ```
 
-is preserved as one Caetla indirect-write operation and round-trips without the `91` row being mistaken for an ordinary Type `9` write. C3 pair recognition also remains active after a persistent GameShark-mode selector. The verified binary uses selector `0003` for 32-bit C3 writes; `0002` is not emitted as a valid width. Zero-count C2 blocks are preserved when encountered but are not generated. See `CAETLA_0.341_CODE_TYPES.md` for the complete mapping and compatibility notes.
+is preserved as one Caetla indirect-write operation and round-trips without the `91` row being mistaken for an ordinary Type `9` write. C3 pair recognition also remains active after a persistent GameShark-mode selector. The verified binary uses selector `0003` for 32-bit C3 writes; `0002` is not emitted as a valid width. Zero-count C2 blocks are preserved when encountered but are not generated. 
 
 ### DuckStation: condense equal activators
 
