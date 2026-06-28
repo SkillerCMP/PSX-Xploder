@@ -41,16 +41,26 @@ namespace psx_code_types
         CompareEqual8,
         CompareNotEqual8,
         CompareLess8,
+        CompareLessOrEqual8,
         CompareGreater8,
         CompareEqual16,
         CompareNotEqual16,
         CompareLess16,
+        CompareLessOrEqual16,
         CompareGreater16,
+        GlobalCompareEqual16,
         CompareEqual32,
         CompareNotEqual32,
         CompareLess32,
         CompareGreater32,
         BlockCompareEqual16,
+        BlockCompareEqual32,
+        BlockCompareLess8,
+        BlockCompareGreater8,
+        BlockCompareLess16,
+        BlockCompareGreater16,
+        BlockButtonsEqual,
+        BlockButtonsNotEqual,
         BlockEnd,
         Increment8,
         Increment16,
@@ -61,13 +71,15 @@ namespace psx_code_types
         SerialRepeater,
         CopyMemory,
         Joker16,
-        CodesOn,
-        CodesOff,
+        GameSharkControlD5,
+        GameSharkControlD6,
         ConditionalWrite16,
         ConditionalWrite16Restore,
         ConditionalWrite8Restore,
+        Scratchpad8,
         Scratchpad16,
         Scratchpad32,
+        DuckStationRaw,
         XploderMassWrite,
         XploderMegaCode,
         CaetlaIndirectWrite,
@@ -90,6 +102,7 @@ namespace psx_code_types
         bool addressDecreases = false;
         std::string value;
         std::string compareValue;
+        std::string opcode;
         std::vector<std::uint8_t> payload;
         std::vector<std::string> sourceLines;
         std::string text;
@@ -104,6 +117,14 @@ namespace psx_code_types
         std::string suffix;
         std::uint32_t address = 0;
     };
+
+    inline bool isDuckStationBitRepeater(const Operation& operation) noexcept
+    {
+        return operation.sourceFamily == Family::DuckStation &&
+               (operation.opcode == "31" || operation.opcode == "32" ||
+                operation.opcode == "81" || operation.opcode == "82" ||
+                operation.opcode == "91" || operation.opcode == "92");
+    }
 
     inline std::string trim(std::string_view text)
     {
@@ -340,14 +361,23 @@ namespace psx_code_types
     }
 
 
-    inline bool isBasicRepeaterWrite(const Operation& operation) noexcept
+    inline bool isBasicRepeaterWrite(
+        const Operation& operation,
+        bool allow32BitWrites = false) noexcept
     {
-        return (operation.kind == OperationKind::Write8 || operation.kind == OperationKind::Write16) &&
+        return (operation.kind == OperationKind::Write8 ||
+                operation.kind == OperationKind::Write16 ||
+                (allow32BitWrites && operation.kind == OperationKind::Write32)) &&
                !operation.defaultOff && operation.suffix.empty();
     }
 
     inline std::vector<Operation> condenseWritesToBasicSerialRepeaters(
-        const std::vector<Operation>& operations)
+        const std::vector<Operation>& operations,
+        std::uint32_t maximumAddressStep = 0xFFU,
+        bool allowByteWrites = true,
+        bool allowSignedSteps = false,
+        bool allow32BitWrites = false,
+        std::uint32_t maximumCount = 0xFFU)
     {
         std::vector<Operation> output;
         output.reserve(operations.size());
@@ -356,27 +386,43 @@ namespace psx_code_types
         while (index < operations.size())
         {
             const Operation& first = operations[index];
-            if (!isBasicRepeaterWrite(first) || index + 2U >= operations.size())
+            if (!isBasicRepeaterWrite(first, allow32BitWrites) ||
+                (!allowByteWrites && first.kind == OperationKind::Write8) ||
+                index + 2U >= operations.size())
             {
                 output.push_back(first);
                 ++index;
                 continue;
             }
 
-            const int widthBits = first.kind == OperationKind::Write8 ? 8 : 16;
-            const std::uint32_t valueMask = widthBits == 8 ? 0xFFU : 0xFFFFU;
+            const int widthBits = first.kind == OperationKind::Write8
+                ? 8
+                : (first.kind == OperationKind::Write16 ? 16 : 32);
+            const std::uint32_t valueMask = widthBits == 8
+                ? 0xFFU
+                : (widthBits == 16 ? 0xFFFFU : 0xFFFFFFFFU);
             const Operation& second = operations[index + 1U];
-            if (!isBasicRepeaterWrite(second) ||
-                second.kind != first.kind ||
-                second.address <= first.address)
+            if (!isBasicRepeaterWrite(second, allow32BitWrites) ||
+                second.kind != first.kind)
             {
                 output.push_back(first);
                 ++index;
                 continue;
             }
 
-            const std::uint32_t addressStep = second.address - first.address;
-            if (addressStep == 0U || addressStep > 0xFFU)
+            bool addressDecreases = false;
+            std::uint32_t addressStep = 0U;
+            if (second.address > first.address)
+            {
+                addressStep = second.address - first.address;
+            }
+            else if (allowSignedSteps && second.address < first.address)
+            {
+                addressDecreases = true;
+                addressStep = first.address - second.address;
+            }
+
+            if (addressStep == 0U || addressStep > maximumAddressStep)
             {
                 output.push_back(first);
                 ++index;
@@ -386,6 +432,7 @@ namespace psx_code_types
             const bool wildcard = hasWildcard(first.value) || hasWildcard(second.value);
             std::uint32_t startValue = 0;
             std::uint32_t valueStep = 0;
+            bool valueDecreases = false;
             if (wildcard)
             {
                 if (upper(first.value) != upper(second.value))
@@ -404,18 +451,39 @@ namespace psx_code_types
                     ++index;
                     continue;
                 }
-                valueStep = (secondValue - startValue) & valueMask;
+                if (allowSignedSteps)
+                {
+                    const std::uint32_t increaseStep = (secondValue - startValue) & valueMask;
+                    const std::uint32_t decreaseStep = (startValue - secondValue) & valueMask;
+                    if (decreaseStep <= increaseStep)
+                    {
+                        valueDecreases = true;
+                        valueStep = decreaseStep;
+                    }
+                    else
+                    {
+                        valueStep = increaseStep;
+                    }
+                }
+                else
+                {
+                    valueStep = (secondValue - startValue) & valueMask;
+                }
             }
 
             std::size_t runLength = 2U;
-            while (index + runLength < operations.size() && runLength < 0xFFU)
+            while (index + runLength < operations.size() &&
+                   runLength < static_cast<std::size_t>(maximumCount))
             {
                 const Operation& candidate = operations[index + runLength];
-                if (!isBasicRepeaterWrite(candidate) || candidate.kind != first.kind)
+                if (!isBasicRepeaterWrite(candidate, allow32BitWrites) || candidate.kind != first.kind)
                     break;
 
-                const std::uint32_t expectedAddress =
-                    first.address + addressStep * static_cast<std::uint32_t>(runLength);
+                const std::uint32_t addressDelta =
+                    addressStep * static_cast<std::uint32_t>(runLength);
+                const std::uint32_t expectedAddress = addressDecreases
+                    ? first.address - addressDelta
+                    : first.address + addressDelta;
                 if (candidate.address != expectedAddress)
                     break;
 
@@ -429,8 +497,11 @@ namespace psx_code_types
                     std::uint32_t candidateValue = 0;
                     if (!parseHex(candidate.value, candidateValue))
                         break;
-                    const std::uint32_t expectedValue =
-                        (startValue + valueStep * static_cast<std::uint32_t>(runLength)) & valueMask;
+                    const std::uint32_t valueDelta =
+                        valueStep * static_cast<std::uint32_t>(runLength);
+                    const std::uint32_t expectedValue = valueDecreases
+                        ? (startValue - valueDelta) & valueMask
+                        : (startValue + valueDelta) & valueMask;
                     if (candidateValue != expectedValue)
                         break;
                 }
@@ -454,6 +525,8 @@ namespace psx_code_types
             repeater.addressStep = addressStep;
             repeater.valueStep = valueStep;
             repeater.widthBits = widthBits;
+            repeater.addressDecreases = addressDecreases;
+            repeater.valueDecreases = valueDecreases;
             repeater.value = first.value;
             for (std::size_t item = 0; item < runLength; ++item)
             {

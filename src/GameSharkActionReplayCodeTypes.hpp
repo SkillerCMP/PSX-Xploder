@@ -30,10 +30,22 @@ namespace psx_code_types
                 if (parseCodeLine(lines[i + 1U], next) &&
                     (next.addressText.substr(0, 2) == "30" || next.addressText.substr(0, 2) == "80"))
                 {
+                    const std::uint32_t count = static_cast<std::uint32_t>(
+                        std::stoul(line.addressText.substr(4, 2), nullptr, 16));
+                    if (count == 0U)
+                    {
+                        output.push_back(makeDeviceSpecific(
+                            {lines[i], lines[i + 1U]},
+                            "GameShark Type 50 has a zero repeat count; the GS Pro 3.1 handler underflows instead of performing zero writes",
+                            Family::GameSharkActionReplay));
+                        ++i;
+                        continue;
+                    }
+
                     Operation operation;
                     operation.sourceFamily = Family::GameSharkActionReplay;
                     operation.kind = OperationKind::SerialRepeater;
-                    operation.count = static_cast<std::uint32_t>(std::stoul(line.addressText.substr(4, 2), nullptr, 16));
+                    operation.count = count;
                     operation.addressStep = static_cast<std::uint32_t>(std::stoul(line.addressText.substr(6, 2), nullptr, 16));
                     operation.valueStep = static_cast<std::uint32_t>(std::stoul(line.valueText, nullptr, 16));
                     operation.widthBits = next.addressText.substr(0, 2) == "30" ? 8 : 16;
@@ -52,16 +64,28 @@ namespace psx_code_types
             if (prefix2 == "C2" && line.valueText.size() == 4 && i + 1U < lines.size())
             {
                 ParsedCodeLine next;
-                if (parseCodeLine(lines[i + 1U], next) &&
-                    next.addressText.substr(0, 2) == "80" && next.valueText == "0000")
+                if (parseCodeLine(lines[i + 1U], next))
                 {
+                    const std::uint32_t count = static_cast<std::uint32_t>(
+                        std::stoul(line.valueText, nullptr, 16));
+                    if (count == 0U)
+                    {
+                        output.push_back(makeDeviceSpecific(
+                            {lines[i], lines[i + 1U]},
+                            "GameShark C2 has a zero byte count; the GS Pro 3.1 copy loop underflows instead of copying zero bytes",
+                            Family::GameSharkActionReplay));
+                        ++i;
+                        continue;
+                    }
+
                     Operation operation;
                     operation.sourceFamily = Family::GameSharkActionReplay;
                     operation.kind = OperationKind::CopyMemory;
                     operation.address = maskedPsxAddress(line.address);
                     operation.secondAddress = maskedPsxAddress(next.address);
-                    operation.count = static_cast<std::uint32_t>(std::stoul(line.valueText, nullptr, 16));
+                    operation.count = count;
                     operation.sourceLines = {lines[i], lines[i + 1U]};
+                    operation.suffix = line.suffix;
                     output.push_back(std::move(operation));
                     ++i;
                     continue;
@@ -87,24 +111,40 @@ namespace psx_code_types
             }
             else if (prefix2 == "E0") { operation.kind = OperationKind::CompareEqual8; operation.value = byteValue(line.valueText); }
             else if (prefix2 == "E1") { operation.kind = OperationKind::CompareNotEqual8; operation.value = byteValue(line.valueText); }
-            else if (prefix2 == "E2") { operation.kind = OperationKind::CompareLess8; operation.value = byteValue(line.valueText); }
+            else if (prefix2 == "E2") { operation.kind = OperationKind::CompareLessOrEqual8; operation.value = byteValue(line.valueText); }
             else if (prefix2 == "E3") { operation.kind = OperationKind::CompareGreater8; operation.value = byteValue(line.valueText); }
             else if (prefix2 == "D0") { operation.kind = OperationKind::CompareEqual16; operation.value = wordValue(line.valueText); }
             else if (prefix2 == "D1") { operation.kind = OperationKind::CompareNotEqual16; operation.value = wordValue(line.valueText); }
-            else if (prefix2 == "D2") { operation.kind = OperationKind::CompareLess16; operation.value = wordValue(line.valueText); }
+            else if (prefix2 == "D2") { operation.kind = OperationKind::CompareLessOrEqual16; operation.value = wordValue(line.valueText); }
             else if (prefix2 == "D3") { operation.kind = OperationKind::CompareGreater16; operation.value = wordValue(line.valueText); }
-            else if (line.addressText == "D4000000") { operation.kind = OperationKind::Joker16; operation.value = wordValue(line.valueText); }
-            else if (line.addressText == "D5000000") { operation.kind = OperationKind::CodesOn; operation.value = wordValue(line.valueText); }
-            else if (line.addressText == "D6000000") { operation.kind = OperationKind::CodesOff; operation.value = wordValue(line.valueText); }
+            else if (prefix2 == "C0") { operation.kind = OperationKind::GlobalCompareEqual16; operation.value = wordValue(line.valueText); }
+            else if (prefix2 == "D4")
+            {
+                operation.kind = OperationKind::Joker16;
+                operation.value = wordValue(line.valueText);
+                operation.detail = "GameShark Pro 3.1 controller-state compare; the encoded address field is ignored by the firmware handler";
+            }
+            else if (line.addressText == "D5000000")
+            {
+                operation.kind = OperationKind::GameSharkControlD5;
+                operation.value = wordValue(line.valueText);
+                operation.detail = "GameShark menu/control row; the GS Pro 3.1 built-in database labels D5000000 0000 as Joypad toggle off";
+            }
+            else if (line.addressText == "D6000000")
+            {
+                operation.kind = OperationKind::GameSharkControlD6;
+                operation.value = wordValue(line.valueText);
+                operation.detail = "GameShark menu/control row with no confirmed cross-device equivalent";
+            }
             else if (prefix2 == "10") { operation.kind = OperationKind::Increment16; operation.value = wordValue(line.valueText); }
             else if (prefix2 == "11") { operation.kind = OperationKind::Decrement16; operation.value = wordValue(line.valueText); }
             else if (prefix2 == "20") { operation.kind = OperationKind::Increment8; operation.value = byteValue(line.valueText); }
             else if (prefix2 == "21") { operation.kind = OperationKind::Decrement8; operation.value = byteValue(line.valueText); }
             else if (prefix2 == "1F" && line.valueText.size() == 4)
             {
-                operation.kind = OperationKind::Scratchpad16;
+                operation.kind = OperationKind::Scratchpad8;
                 operation.address = line.address;
-                operation.value = wordValue(line.valueText);
+                operation.value = byteValue(line.valueText);
             }
             else
             {
@@ -134,6 +174,13 @@ namespace psx_code_types
         const Operation& operation,
         std::string_view destination)
     {
+        if (operation.count == 0U)
+        {
+            appendUnsupported(lines, operation, destination,
+                "serial repeater count must be from 1 to 0xFF for classic GameShark Type 50");
+            return false;
+        }
+
         const bool wildcardSeed = hasWildcard(operation.value);
         if (wildcardSeed && operation.valueStep != 0U)
         {
@@ -233,25 +280,37 @@ namespace psx_code_types
                     break;
                 case OperationKind::CompareEqual8: lines.push_back(formatCode(0xE0000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
                 case OperationKind::CompareNotEqual8: lines.push_back(formatCode(0xE1000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
-                case OperationKind::CompareLess8: lines.push_back(formatCode(0xE2000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
+                case OperationKind::CompareLessOrEqual8: lines.push_back(formatCode(0xE2000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
                 case OperationKind::CompareGreater8: lines.push_back(formatCode(0xE3000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
                 case OperationKind::CompareEqual16: lines.push_back(formatCode(0xD0000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
                 case OperationKind::CompareNotEqual16: lines.push_back(formatCode(0xD1000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
-                case OperationKind::CompareLess16: lines.push_back(formatCode(0xD2000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
+                case OperationKind::CompareLessOrEqual16: lines.push_back(formatCode(0xD2000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
                 case OperationKind::CompareGreater16: lines.push_back(formatCode(0xD3000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
+                case OperationKind::GlobalCompareEqual16: lines.push_back(formatCode(0xC0000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
                 case OperationKind::Increment8: lines.push_back(formatCode(0x20000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
                 case OperationKind::Decrement8: lines.push_back(formatCode(0x21000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
                 case OperationKind::Increment16: lines.push_back(formatCode(0x10000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
                 case OperationKind::Decrement16: lines.push_back(formatCode(0x11000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
                 case OperationKind::Joker16: lines.push_back(formatCode("D4000000", wordValue(operation.value), operation.suffix)); break;
-                case OperationKind::CodesOn: lines.push_back(formatCode("D5000000", wordValue(operation.value), operation.suffix)); break;
-                case OperationKind::CodesOff: lines.push_back(formatCode("D6000000", wordValue(operation.value), operation.suffix)); break;
+                case OperationKind::GameSharkControlD5: lines.push_back(formatCode("D5000000", wordValue(operation.value), operation.suffix)); break;
+                case OperationKind::GameSharkControlD6: lines.push_back(formatCode("D6000000", wordValue(operation.value), operation.suffix)); break;
                 case OperationKind::CopyMemory:
-                    lines.push_back(formatCode(0xC2000000U | maskedPsxAddress(operation.address), hex(operation.count, 4)));
-                    lines.push_back(formatCode(0x80000000U | maskedPsxAddress(operation.secondAddress), "0000"));
+                    if (operation.count >= 1U && operation.count <= 0xFFFFU)
+                    {
+                        lines.push_back(formatCode(0xC2000000U | maskedPsxAddress(operation.address), hex(operation.count, 4), operation.suffix));
+                        lines.push_back(formatCode(0x80000000U | maskedPsxAddress(operation.secondAddress), "0000"));
+                    }
+                    else
+                    {
+                        appendUnsupported(lines, operation, "GameShark / Action Replay", "C2 copy length must be from 1 to 0xFFFF bytes");
+                    }
                     break;
                 case OperationKind::SerialRepeater:
-                    if (operation.count <= 0xFFU && operation.addressStep <= 0xFFU &&
+                    if (isDuckStationBitRepeater(operation))
+                    {
+                        appendUnsupported(lines, operation, "GameShark / Action Replay", "DuckStation bit-set/bit-clear slides do not have a classic GameShark equivalent");
+                    }
+                    else if (operation.count >= 1U && operation.count <= 0xFFU && operation.addressStep <= 0xFFU &&
                         operation.valueStep <= 0xFFFFU &&
                         (operation.widthBits == 8 || operation.widthBits == 16) &&
                         !operation.addressDecreases && !operation.valueDecreases)
@@ -281,6 +340,9 @@ namespace psx_code_types
                     lines.push_back(formatCode(0xE0000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.compareValue)));
                     appendGameSharkWrite(lines, 8, operation.address, operation.value, operation.suffix);
                     break;
+                case OperationKind::Scratchpad8:
+                    lines.push_back(formatCode(operation.address, "00" + byteValue(operation.value), operation.suffix));
+                    break;
                 case OperationKind::Scratchpad16:
                     lines.push_back(formatCode(operation.address, wordValue(operation.value), operation.suffix));
                     break;
@@ -301,12 +363,22 @@ namespace psx_code_types
                 case OperationKind::CompareNotEqual32:
                 case OperationKind::CompareLess32:
                 case OperationKind::CompareGreater32:
+                case OperationKind::CompareLess8:
+                case OperationKind::CompareLess16:
                 case OperationKind::Increment32:
                 case OperationKind::Decrement32:
                 case OperationKind::XploderMegaCode:
                 case OperationKind::CaetlaIndirectWrite:
                 case OperationKind::BlockCompareEqual16:
+                case OperationKind::BlockCompareEqual32:
+                case OperationKind::BlockCompareLess8:
+                case OperationKind::BlockCompareGreater8:
+                case OperationKind::BlockCompareLess16:
+                case OperationKind::BlockCompareGreater16:
+                case OperationKind::BlockButtonsEqual:
+                case OperationKind::BlockButtonsNotEqual:
                 case OperationKind::BlockEnd:
+                case OperationKind::DuckStationRaw:
                 case OperationKind::DeviceSpecific:
                     appendUnsupported(lines, operation, "GameShark / Action Replay");
                     break;

@@ -11,9 +11,40 @@ namespace psx_code_types
     {
         const std::vector<std::string> lines = splitLines(input);
         std::vector<Operation> output;
+        bool assemblySection = false;
 
         for (std::size_t i = 0; i < lines.size(); ++i)
         {
+            const std::string trimmed = trim(lines[i]);
+            if (!trimmed.empty() && trimmed.front() == '[' && trimmed.back() == ']')
+            {
+                assemblySection = false;
+                output.push_back(makeText(lines[i], Family::DuckStation));
+                continue;
+            }
+            if (startsWithIgnoreCase(trimmed, "Type ="))
+            {
+                const std::string typeValue = trim(std::string_view(trimmed).substr(6));
+                assemblySection = startsWithIgnoreCase(typeValue, "Assembly");
+                output.push_back(makeText(lines[i], Family::DuckStation));
+                continue;
+            }
+            if (assemblySection)
+            {
+                if (trimmed.empty() || trimmed.front() == ';' || trimmed.front() == '#')
+                    output.push_back(makeText(lines[i], Family::DuckStation));
+                else
+                {
+                    Operation operation;
+                    operation.kind = OperationKind::DuckStationRaw;
+                    operation.sourceFamily = Family::DuckStation;
+                    operation.sourceLines = {lines[i]};
+                    operation.detail = "DuckStation Assembly body row";
+                    output.push_back(std::move(operation));
+                }
+                continue;
+            }
+
             ParsedCodeLine line;
             if (!parseCodeLine(lines[i], line))
             {
@@ -24,13 +55,77 @@ namespace psx_code_types
             const std::string prefix2 = line.addressText.substr(0, 2);
             const char prefix1 = line.addressText[0];
 
+            auto appendRawRange = [&](std::size_t last, std::string detail) {
+                Operation raw;
+                raw.kind = OperationKind::DuckStationRaw;
+                raw.sourceFamily = Family::DuckStation;
+                raw.detail = std::move(detail);
+                for (std::size_t sourceIndex = i; sourceIndex <= last && sourceIndex < lines.size(); ++sourceIndex)
+                    raw.sourceLines.push_back(lines[sourceIndex]);
+                output.push_back(std::move(raw));
+                i = std::min(last, lines.size() - 1U);
+            };
+
+            // These instructions consume additional rows or control a whole
+            // block. Preserve the complete structure as one operation so a
+            // conversion to another device cannot accidentally emit the body
+            // as unconditional writes.
+            if (prefix2 == "F4")
+            {
+                appendRawRange(std::min(i + 4U, lines.size() - 1U),
+                    "DuckStation F4 find-and-replace structure preserved verbatim");
+                continue;
+            }
+            if (prefix2 == "F3")
+            {
+                appendRawRange(std::min(i + 1U, lines.size() - 1U),
+                    "DuckStation F3 range structure preserved verbatim");
+                continue;
+            }
+            if (prefix2 == "D7" || prefix2 == "52" || prefix2 == "F6")
+            {
+                std::size_t end = i;
+                for (std::size_t cursor = i + 1U; cursor < lines.size(); ++cursor)
+                {
+                    const std::string candidate = trim(lines[cursor]);
+                    if (!candidate.empty() && candidate.front() == '[' && candidate.back() == ']')
+                        break;
+                    end = cursor;
+                    ParsedCodeLine terminator;
+                    if (parseCodeLine(lines[cursor], terminator) &&
+                        terminator.addressText == "00000000" && terminator.valueText == "FFFF")
+                    {
+                        break;
+                    }
+                }
+                appendRawRange(end,
+                    "DuckStation advanced block conditional preserved verbatim");
+                continue;
+            }
+            if (prefix2 == "C1")
+            {
+                std::size_t end = i;
+                for (std::size_t cursor = i + 1U; cursor < lines.size(); ++cursor)
+                {
+                    const std::string candidate = trim(lines[cursor]);
+                    if (!candidate.empty() && candidate.front() == '[' && candidate.back() == ']')
+                        break;
+                    end = cursor;
+                }
+                appendRawRange(end,
+                    "DuckStation delayed-activation row and dependent section body preserved verbatim");
+                continue;
+            }
+
             if (prefix2 == "53" && line.valueText.size() == 8 && i + 1U < lines.size())
             {
                 ParsedCodeLine next;
                 if (parseCodeLine(lines[i + 1U], next))
                 {
                     const std::string writePrefix = next.addressText.substr(0, 2);
-                    if (writePrefix == "30" || writePrefix == "80" || writePrefix == "90")
+                    if (writePrefix == "30" || writePrefix == "31" || writePrefix == "32" ||
+                        writePrefix == "80" || writePrefix == "81" || writePrefix == "82" ||
+                        writePrefix == "90" || writePrefix == "91" || writePrefix == "92")
                     {
                         Operation operation;
                         operation.sourceFamily = Family::DuckStation;
@@ -40,7 +135,8 @@ namespace psx_code_types
                         operation.count = static_cast<std::uint32_t>(std::stoul(line.addressText.substr(4, 4), nullptr, 16));
                         operation.addressStep = static_cast<std::uint32_t>(std::stoul(line.valueText.substr(0, 4), nullptr, 16));
                         operation.valueStep = static_cast<std::uint32_t>(std::stoul(line.valueText.substr(4, 4), nullptr, 16));
-                        operation.widthBits = writePrefix == "30" ? 8 : (writePrefix == "80" ? 16 : 32);
+                        operation.widthBits = writePrefix[0] == '3' ? 8 : (writePrefix[0] == '8' ? 16 : 32);
+                        operation.opcode = writePrefix;
                         operation.address = maskedPsxAddress(next.address);
                         operation.value = operation.widthBits == 8
                             ? byteValue(next.valueText)
@@ -57,17 +153,24 @@ namespace psx_code_types
             {
                 ParsedCodeLine next;
                 if (parseCodeLine(lines[i + 1U], next) &&
-                    (next.addressText.substr(0, 2) == "30" || next.addressText.substr(0, 2) == "80"))
+                    (next.addressText.substr(0, 2) == "30" || next.addressText.substr(0, 2) == "80" ||
+                     next.addressText.substr(0, 2) == "90"))
                 {
+                    const std::uint32_t count = static_cast<std::uint32_t>(
+                        std::stoul(line.addressText.substr(4, 2), nullptr, 16));
                     Operation operation;
                     operation.sourceFamily = Family::DuckStation;
                     operation.kind = OperationKind::SerialRepeater;
-                    operation.count = static_cast<std::uint32_t>(std::stoul(line.addressText.substr(4, 2), nullptr, 16));
+                    operation.count = count;
                     operation.addressStep = static_cast<std::uint32_t>(std::stoul(line.addressText.substr(6, 2), nullptr, 16));
                     operation.valueStep = static_cast<std::uint32_t>(std::stoul(line.valueText, nullptr, 16));
-                    operation.widthBits = next.addressText.substr(0, 2) == "30" ? 8 : 16;
+                    const std::string writePrefix = next.addressText.substr(0, 2);
+                    operation.widthBits = writePrefix == "30" ? 8 : (writePrefix == "80" ? 16 : 32);
+                    operation.opcode = writePrefix;
                     operation.address = maskedPsxAddress(next.address);
-                    operation.value = operation.widthBits == 8 ? byteValue(next.valueText) : wordValue(next.valueText);
+                    operation.value = operation.widthBits == 8
+                        ? byteValue(next.valueText)
+                        : (operation.widthBits == 16 ? wordValue(next.valueText) : "0000" + wordValue(next.valueText));
                     operation.sourceLines = {lines[i], lines[i + 1U]};
                     output.push_back(std::move(operation));
                     ++i;
@@ -78,15 +181,16 @@ namespace psx_code_types
             if (prefix2 == "C2" && line.valueText.size() == 4 && i + 1U < lines.size())
             {
                 ParsedCodeLine next;
-                if (parseCodeLine(lines[i + 1U], next) &&
-                    next.addressText.substr(0, 2) == "80" && next.valueText == "0000")
+                if (parseCodeLine(lines[i + 1U], next))
                 {
+                    const std::uint32_t count = static_cast<std::uint32_t>(
+                        std::stoul(line.valueText, nullptr, 16));
                     Operation operation;
                     operation.sourceFamily = Family::DuckStation;
                     operation.kind = OperationKind::CopyMemory;
                     operation.address = maskedPsxAddress(line.address);
                     operation.secondAddress = maskedPsxAddress(next.address);
-                    operation.count = static_cast<std::uint32_t>(std::stoul(line.valueText, nullptr, 16));
+                    operation.count = count;
                     operation.sourceLines = {lines[i], lines[i + 1U]};
                     output.push_back(std::move(operation));
                     ++i;
@@ -167,9 +271,24 @@ namespace psx_code_types
             else if (prefix2 == "D1") { operation.kind = OperationKind::CompareNotEqual16; operation.value = wordValue(line.valueText); }
             else if (prefix2 == "D2") { operation.kind = OperationKind::CompareLess16; operation.value = wordValue(line.valueText); }
             else if (prefix2 == "D3") { operation.kind = OperationKind::CompareGreater16; operation.value = wordValue(line.valueText); }
-            else if (line.addressText == "D4000000") { operation.kind = OperationKind::Joker16; operation.value = wordValue(line.valueText); }
-            else if (line.addressText == "D5000000") { operation.kind = OperationKind::CodesOn; operation.value = wordValue(line.valueText); }
-            else if (line.addressText == "D6000000") { operation.kind = OperationKind::CodesOff; operation.value = wordValue(line.valueText); }
+            else if (prefix2 == "D4")
+            {
+                operation.kind = OperationKind::Joker16;
+                operation.value = wordValue(line.valueText);
+                operation.detail = "GameShark controller-state compare; the encoded address field is ignored by GS Pro 3.1";
+            }
+            else if (prefix2 == "D5")
+            {
+                operation.kind = OperationKind::BlockButtonsEqual;
+                operation.value = wordValue(line.valueText);
+                operation.detail = "DuckStation block executes when the exact controller state equals the value";
+            }
+            else if (prefix2 == "D6")
+            {
+                operation.kind = OperationKind::BlockButtonsNotEqual;
+                operation.value = wordValue(line.valueText);
+                operation.detail = "DuckStation block executes when the exact controller state does not equal the value";
+            }
             else if (prefix2 == "10") { operation.kind = OperationKind::Increment16; operation.value = wordValue(line.valueText); }
             else if (prefix2 == "11") { operation.kind = OperationKind::Decrement16; operation.value = wordValue(line.valueText); }
             else if (prefix2 == "20") { operation.kind = OperationKind::Increment8; operation.value = byteValue(line.valueText); }
@@ -177,8 +296,24 @@ namespace psx_code_types
             else if (prefix2 == "1F" && line.valueText.size() == 4)
             {
                 operation.kind = OperationKind::Scratchpad16;
-                operation.address = line.address;
+                operation.address = 0x1F800000U | (line.address & 0x3FFU);
                 operation.value = wordValue(line.valueText);
+            }
+            else if (prefix2 == "A4" && line.valueText.size() == 8)
+            {
+                operation.kind = OperationKind::BlockCompareEqual32;
+                operation.value = dwordValue(line.valueText);
+            }
+            else if (prefix2 == "C3") { operation.kind = OperationKind::BlockCompareLess8; operation.value = byteValue(line.valueText); }
+            else if (prefix2 == "C4") { operation.kind = OperationKind::BlockCompareGreater8; operation.value = byteValue(line.valueText); }
+            else if (prefix2 == "C5") { operation.kind = OperationKind::BlockCompareLess16; operation.value = wordValue(line.valueText); }
+            else if (prefix2 == "C6") { operation.kind = OperationKind::BlockCompareGreater16; operation.value = wordValue(line.valueText); }
+            else if (prefix2 == "C1" || prefix2 == "D7" || prefix2 == "F0" || prefix2 == "F1" ||
+                     prefix2 == "F2" || prefix2 == "F3" || prefix2 == "F4" || prefix2 == "F5" ||
+                     prefix2 == "F6" || prefix2 == "51" || prefix2 == "52")
+            {
+                operation.kind = OperationKind::DuckStationRaw;
+                operation.detail = "DuckStation-specific code type preserved verbatim";
             }
             else
             {
@@ -237,6 +372,9 @@ namespace psx_code_types
         std::string name = "Unnamed Cheat";
         std::string description;
         std::string author;
+        std::string type = "Gameshark";
+        std::string activation = "EndFrame";
+        std::vector<std::string> extraProperties;
         std::vector<std::string> groupPath;
     };
 
@@ -468,7 +606,10 @@ namespace psx_code_types
                 startsWithIgnoreCase(text, "Activation =") ||
                 startsWithIgnoreCase(text, "Description =") ||
                 startsWithIgnoreCase(text, "Author =") ||
-                startsWithIgnoreCase(text, "OptionRange ="))
+                startsWithIgnoreCase(text, "Option =") ||
+                startsWithIgnoreCase(text, "OptionRange =") ||
+                startsWithIgnoreCase(text, "DisallowForAchievements =") ||
+                startsWithIgnoreCase(text, "Ignore ="))
             {
                 return false;
             }
@@ -566,7 +707,7 @@ namespace psx_code_types
                 return;
             if (startsWithIgnoreCase(text, "//"))
                 lines.push_back("; " + trim(std::string_view(text).substr(2)));
-            else if (text.front() == ';')
+            else if (text.front() == ';' || text.front() == '#')
                 lines.push_back(text);
             else
                 lines.push_back("; " + text);
@@ -590,16 +731,29 @@ namespace psx_code_types
             case OperationKind::CompareEqual8: lines.push_back(formatCode(0xE0000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
             case OperationKind::CompareNotEqual8: lines.push_back(formatCode(0xE1000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
             case OperationKind::CompareLess8: lines.push_back(formatCode(0xE2000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
+            case OperationKind::CompareLessOrEqual8:
+                appendUnsupported(lines, operation, "DuckStation", "DuckStation E2 is strict less-than, not less-than-or-equal");
+                break;
             case OperationKind::CompareGreater8: lines.push_back(formatCode(0xE3000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
             case OperationKind::CompareEqual16: lines.push_back(formatCode(0xD0000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
             case OperationKind::CompareNotEqual16: lines.push_back(formatCode(0xD1000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
             case OperationKind::CompareLess16: lines.push_back(formatCode(0xD2000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
+            case OperationKind::CompareLessOrEqual16:
+                appendUnsupported(lines, operation, "DuckStation", "DuckStation D2 is strict less-than, not less-than-or-equal");
+                break;
             case OperationKind::CompareGreater16: lines.push_back(formatCode(0xD3000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
             case OperationKind::CompareEqual32: lines.push_back(formatCode(0xA0000000U | maskedPsxAddress(operation.address), dwordValue(operation.value), operation.suffix)); break;
             case OperationKind::CompareNotEqual32: lines.push_back(formatCode(0xA1000000U | maskedPsxAddress(operation.address), dwordValue(operation.value), operation.suffix)); break;
             case OperationKind::CompareLess32: lines.push_back(formatCode(0xA2000000U | maskedPsxAddress(operation.address), dwordValue(operation.value), operation.suffix)); break;
             case OperationKind::CompareGreater32: lines.push_back(formatCode(0xA3000000U | maskedPsxAddress(operation.address), dwordValue(operation.value), operation.suffix)); break;
             case OperationKind::BlockCompareEqual16: lines.push_back(formatCode(0xC0000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
+            case OperationKind::BlockCompareEqual32: lines.push_back(formatCode(0xA4000000U | maskedPsxAddress(operation.address), dwordValue(operation.value), operation.suffix)); break;
+            case OperationKind::BlockCompareLess8: lines.push_back(formatCode(0xC3000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
+            case OperationKind::BlockCompareGreater8: lines.push_back(formatCode(0xC4000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
+            case OperationKind::BlockCompareLess16: lines.push_back(formatCode(0xC5000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
+            case OperationKind::BlockCompareGreater16: lines.push_back(formatCode(0xC6000000U | maskedPsxAddress(operation.address), wordValue(operation.value), operation.suffix)); break;
+            case OperationKind::BlockButtonsEqual: lines.push_back(formatCode("D5000000", wordValue(operation.value), operation.suffix)); break;
+            case OperationKind::BlockButtonsNotEqual: lines.push_back(formatCode("D6000000", wordValue(operation.value), operation.suffix)); break;
             case OperationKind::BlockEnd: lines.push_back(formatCode("00000000", "FFFF", operation.suffix)); break;
             case OperationKind::Increment8: lines.push_back(formatCode(0x20000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
             case OperationKind::Decrement8: lines.push_back(formatCode(0x21000000U | maskedPsxAddress(operation.address), "00" + byteValue(operation.value), operation.suffix)); break;
@@ -608,16 +762,30 @@ namespace psx_code_types
             case OperationKind::Increment32: lines.push_back(formatCode(0x60000000U | maskedPsxAddress(operation.address), dwordValue(operation.value), operation.suffix)); break;
             case OperationKind::Decrement32: lines.push_back(formatCode(0x61000000U | maskedPsxAddress(operation.address), dwordValue(operation.value), operation.suffix)); break;
             case OperationKind::Joker16: lines.push_back(formatCode("D4000000", wordValue(operation.value), operation.suffix)); break;
-            case OperationKind::CodesOn: lines.push_back(formatCode("D5000000", wordValue(operation.value), operation.suffix)); break;
-            case OperationKind::CodesOff: lines.push_back(formatCode("D6000000", wordValue(operation.value), operation.suffix)); break;
             case OperationKind::CopyMemory:
-                lines.push_back(formatCode(0xC2000000U | maskedPsxAddress(operation.address), hex(operation.count, 4)));
-                lines.push_back(formatCode(0x80000000U | maskedPsxAddress(operation.secondAddress), "0000"));
+                if (operation.count <= 0xFFFFU)
+                {
+                    lines.push_back(formatCode(0xC2000000U | maskedPsxAddress(operation.address), hex(operation.count, 4), operation.suffix));
+                    lines.push_back(formatCode(0x80000000U | maskedPsxAddress(operation.secondAddress), "0000"));
+                }
+                else
+                {
+                    std::vector<std::string> unsupported;
+                    appendUnsupported(unsupported, operation, "DuckStation", "C2 copy length must be from 1 to 0xFFFF bytes");
+                    for (std::string& warning : unsupported)
+                    {
+                        if (startsWithIgnoreCase(warning, "//"))
+                            warning = "; " + trim(std::string_view(warning).substr(2));
+                        lines.push_back(std::move(warning));
+                    }
+                }
                 break;
             case OperationKind::SerialRepeater:
             {
                 if (operation.count <= 0xFFU && operation.addressStep <= 0xFFU && operation.valueStep <= 0xFFFFU &&
-                    (operation.widthBits == 8 || operation.widthBits == 16) && !operation.addressDecreases && !operation.valueDecreases)
+                    (operation.widthBits == 8 || operation.widthBits == 16 || operation.widthBits == 32) &&
+                    !operation.addressDecreases && !operation.valueDecreases &&
+                    (operation.opcode.empty() || operation.opcode == "30" || operation.opcode == "80" || operation.opcode == "90"))
                 {
                     const std::uint32_t header = 0x50000000U | ((operation.count & 0xFFU) << 8) | (operation.addressStep & 0xFFU);
                     lines.push_back(formatCode(header, hex(operation.valueStep, 4)));
@@ -631,7 +799,14 @@ namespace psx_code_types
                         (operation.valueDecreases ? 0x00010000U : 0U) |
                         (operation.count & 0xFFFFU);
                     lines.push_back(formatCode(header, hex(operation.addressStep, 4) + hex(operation.valueStep, 4)));
-                    appendDuckStationWrite(lines, operation.widthBits, operation.address, operation.value);
+                    if (operation.opcode == "31" || operation.opcode == "32")
+                        lines.push_back(formatCode((operation.opcode == "31" ? 0x31000000U : 0x32000000U) | maskedPsxAddress(operation.address), "00" + byteValue(operation.value)));
+                    else if (operation.opcode == "81" || operation.opcode == "82")
+                        lines.push_back(formatCode((operation.opcode == "81" ? 0x81000000U : 0x82000000U) | maskedPsxAddress(operation.address), wordValue(operation.value)));
+                    else if (operation.opcode == "91" || operation.opcode == "92")
+                        lines.push_back(formatCode((operation.opcode == "91" ? 0x91000000U : 0x92000000U) | maskedPsxAddress(operation.address), dwordValue(operation.value)));
+                    else
+                        appendDuckStationWrite(lines, operation.widthBits, operation.address, operation.value);
                 }
                 else
                 {
@@ -648,15 +823,37 @@ namespace psx_code_types
             case OperationKind::ConditionalWrite8Restore:
                 lines.push_back(formatCode(0xA8000000U | maskedPsxAddress(operation.address), byteValue(operation.compareValue) + byteValue(operation.value), operation.suffix));
                 break;
+            case OperationKind::Scratchpad8:
+                lines.push_back(formatCode(operation.address, "00" + byteValue(operation.value), operation.suffix));
+                break;
             case OperationKind::Scratchpad16:
                 lines.push_back(formatCode(operation.address, wordValue(operation.value), operation.suffix));
                 break;
             case OperationKind::Scratchpad32:
                 lines.push_back(formatCode(0xA5000000U | (operation.address & 0xFFFU), dwordValue(operation.value), operation.suffix));
                 break;
+            case OperationKind::DuckStationRaw:
+                if (operation.sourceFamily == Family::DuckStation)
+                {
+                    for (const std::string& source : operation.sourceLines)
+                    {
+                        ParsedCodeLine parsed;
+                        lines.push_back(parseCodeLine(source, parsed)
+                            ? formatCode(parsed.addressText, parsed.valueText, parsed.suffix)
+                            : source);
+                    }
+                }
+                else
+                {
+                    appendUnsupported(lines, operation, "DuckStation");
+                }
+                break;
             case OperationKind::XploderMassWrite:
                 appendMassWriteAsDuckStation(lines, operation);
                 break;
+            case OperationKind::GlobalCompareEqual16:
+            case OperationKind::GameSharkControlD5:
+            case OperationKind::GameSharkControlD6:
             case OperationKind::XploderMegaCode:
             case OperationKind::CaetlaIndirectWrite:
             case OperationKind::DeviceSpecific:
@@ -731,12 +928,14 @@ namespace psx_code_types
             lines.push_back({});
 
         lines.push_back("[" + buildDuckStationPatchName(section.metadata) + "]");
-        lines.push_back("Type = Gameshark");
-        lines.push_back("Activation = EndFrame");
+        lines.push_back("Type = " + (section.metadata.type.empty() ? std::string("Gameshark") : section.metadata.type));
+        lines.push_back("Activation = " + (section.metadata.activation.empty() ? std::string("EndFrame") : section.metadata.activation));
         if (!section.metadata.description.empty())
             lines.push_back("Description = " + section.metadata.description);
         if (!section.metadata.author.empty())
             lines.push_back("Author = " + section.metadata.author);
+        for (const std::string& property : section.metadata.extraProperties)
+            lines.push_back(property);
 
         for (std::size_t i = 0; i < section.operations.size();)
         {
@@ -885,9 +1084,27 @@ namespace psx_code_types
                         pendingAuthor = std::move(propertyValue);
                     continue;
                 }
-                if (startsWithIgnoreCase(trim(operation.text), "Type =") ||
-                    startsWithIgnoreCase(trim(operation.text), "Activation ="))
+                if (parseDuckStationPropertyLine(operation.text, "Type =", propertyValue))
                 {
+                    if (haveCurrent)
+                        current.metadata.type = std::move(propertyValue);
+                    continue;
+                }
+                if (parseDuckStationPropertyLine(operation.text, "Activation =", propertyValue))
+                {
+                    if (haveCurrent)
+                        current.metadata.activation = std::move(propertyValue);
+                    continue;
+                }
+
+                const std::string trimmedProperty = trim(operation.text);
+                if (startsWithIgnoreCase(trimmedProperty, "Option =") ||
+                    startsWithIgnoreCase(trimmedProperty, "OptionRange =") ||
+                    startsWithIgnoreCase(trimmedProperty, "DisallowForAchievements =") ||
+                    startsWithIgnoreCase(trimmedProperty, "Ignore ="))
+                {
+                    if (haveCurrent)
+                        current.metadata.extraProperties.push_back(trimmedProperty);
                     continue;
                 }
 
@@ -895,7 +1112,7 @@ namespace psx_code_types
                 if (text.empty())
                     continue;
 
-                if (haveCurrent && (text.front() == ';' || startsWithIgnoreCase(text, "//")))
+                if (haveCurrent && (text.front() == ';' || text.front() == '#' || startsWithIgnoreCase(text, "//")))
                     current.operations.push_back(operation);
                 continue;
             }
@@ -917,6 +1134,18 @@ namespace psx_code_types
         condition.value = wordValue(blockCondition.value);
         condition.sourceLines = blockCondition.sourceLines;
         return condition;
+    }
+
+    inline bool isDuckStationBlockCondition(OperationKind kind) noexcept
+    {
+        return kind == OperationKind::BlockCompareEqual16 ||
+               kind == OperationKind::BlockCompareEqual32 ||
+               kind == OperationKind::BlockCompareLess8 ||
+               kind == OperationKind::BlockCompareGreater8 ||
+               kind == OperationKind::BlockCompareLess16 ||
+               kind == OperationKind::BlockCompareGreater16 ||
+               kind == OperationKind::BlockButtonsEqual ||
+               kind == OperationKind::BlockButtonsNotEqual;
     }
 
     inline std::vector<Operation> atomizeDuckStationBlockOperation(
@@ -953,7 +1182,7 @@ namespace psx_code_types
                 continue;
             }
 
-            if (operation.kind != OperationKind::BlockCompareEqual16)
+            if (!isDuckStationBlockCondition(operation.kind))
             {
                 output.push_back(operation);
                 continue;
@@ -963,7 +1192,7 @@ namespace psx_code_types
             bool nested = false;
             for (; end < operations.size(); ++end)
             {
-                if (operations[end].kind == OperationKind::BlockCompareEqual16)
+                if (isDuckStationBlockCondition(operations[end].kind))
                 {
                     nested = true;
                     break;
@@ -972,12 +1201,33 @@ namespace psx_code_types
                     break;
             }
 
-            if (nested || end >= operations.size())
+            if (operation.kind != OperationKind::BlockCompareEqual16 || nested || end >= operations.size())
             {
-                output.push_back(makeText(
-                    "// Warning: DuckStation C0 block could not be expanded because it is nested or missing 00000000 FFFF.",
+                std::vector<std::string> sourceLines;
+                const std::size_t last = end < operations.size() ? end : i;
+                for (std::size_t sourceIndex = i; sourceIndex <= last; ++sourceIndex)
+                {
+                    const Operation& sourceOperation = operations[sourceIndex];
+                    if (!sourceOperation.sourceLines.empty())
+                    {
+                        sourceLines.insert(
+                            sourceLines.end(),
+                            sourceOperation.sourceLines.begin(),
+                            sourceOperation.sourceLines.end());
+                    }
+                    else if (sourceOperation.kind == OperationKind::Text && !sourceOperation.text.empty())
+                    {
+                        sourceLines.push_back(sourceOperation.text);
+                    }
+                }
+                output.push_back(makeDeviceSpecific(
+                    std::move(sourceLines),
+                    operation.kind == OperationKind::BlockCompareEqual16
+                        ? "DuckStation C0 block is nested or missing 00000000 FFFF and cannot be converted safely"
+                        : "DuckStation block conditional has no exact destination-device equivalent",
                     Family::DuckStation));
-                output.push_back(operation);
+                if (end < operations.size())
+                    i = end;
                 continue;
             }
 

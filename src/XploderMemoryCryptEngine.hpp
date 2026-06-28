@@ -12,6 +12,7 @@
 //
 // No file I/O in this engine header.
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -53,12 +54,36 @@ namespace xploder_psx
     struct MassWriteInfo
     {
         int payloadKey = 0;
-        int payloadSize = 0;         // external RAW size field: Type 5=count, Type 6=continuation bytes after first 2 inline bytes
-        int payloadByteCount = 0;    // actual data bytes: Type 5=size, Type 6=size+2
-        int runtimePayloadSize = 0;  // loader-internal expanded value (+0x06/+0x12)
-        int sourcePayloadSize = 0;   // following bytes, including the Type 6 descriptor when present
+        int payloadSize = 0;         // canonical external RAW size field / logical payload-byte count
+        int payloadByteCount = 0;    // logical payload bytes copied by Type 5/6 before Type 6 word rounding
+        int runtimePayloadSize = 0;  // bytes actually copied at runtime (Type 6 rounds up to a 4-byte boundary)
+        int sourcePayloadSize = 0;   // following source bytes, including the 10-byte Type 6 descriptor
         int payloadLineCount = 0;    // ceil(sourcePayloadSize / 6)
         bool isType6 = false;
+    };
+
+    // Type 5 and Type 6 rows must be interpreted in the context established by
+    // their header. A payload row can begin with any hexadecimal nibble; that
+    // nibble is data and must not cause the row to be reclassified as a new
+    // top-level code. This role information is shared by the text converter,
+    // semantic parser, annotations, and tests so they all use one layout model.
+    enum class MassWriteRowRole : std::uint8_t
+    {
+        Type5Payload,
+        Type6BreakpointDescriptor,
+        Type6MaskAndInlinePayload,
+        Type6Payload
+    };
+
+    struct MassWriteRowContext
+    {
+        MassWriteRowRole role = MassWriteRowRole::Type5Payload;
+        int rowIndex = 0;
+        int sourceByteOffset = 0;
+        int sourceBytesUsed = 0;
+        int payloadByteOffset = -1;
+        int payloadBytesUsed = 0;
+        int paddingBytes = 0;
     };
 
     inline constexpr std::uint8_t byte(int value) noexcept
@@ -226,6 +251,48 @@ namespace xploder_psx
         return false;
     }
 
+    // Some keyless Type 6 payloads contain an escaped normal-code row so a
+    // literal leading byte 0x08 survives the ordinary Xploder line parser.
+    // The encrypted row keeps the default-off/state bit (0x08) alongside a
+    // normal key nibble, for example 0E...... -> 08...... with Key 6.
+    // This rule is only valid inside a length-owned Type 6 payload row whose
+    // encrypted first byte has a zero high nibble and the state bit set.
+    inline bool decryptType6EscapedPayloadRow(Code& code) noexcept
+    {
+        const std::uint8_t first = code[0];
+        if ((first & 0xF0U) != 0U || (first & 0x08U) == 0U)
+            return false;
+
+        const Route route = routeForCode(code);
+        if (route != Route::Key4 && route != Route::Key5 &&
+            route != Route::Key6 && route != Route::Key7)
+        {
+            return false;
+        }
+
+        if (!decryptCode(code))
+            return false;
+
+        // Ordinary line decryption strips the state bit because it normally
+        // belongs to the code address. Here it is a literal payload byte.
+        code[0] = byte(code[0] | 0x08U);
+        return true;
+    }
+
+    inline bool encryptType6EscapedPayloadRow(Code& code, Key key) noexcept
+    {
+        // Only the literal 0x08 escape form is representable: the low three
+        // bits are occupied by the selected Xploder key.
+        if (code[0] != 0x08U || !isExplicitKey(key))
+            return false;
+
+        if (!encryptCode(code, key))
+            return false;
+
+        code[0] = byte(code[0] | 0x08U);
+        return true;
+    }
+
     // Decrypt one forced Type 5/6 payload chunk. These are not normal line keys.
     inline bool decryptPayloadChunk(Code& code, int payloadKey) noexcept
     {
@@ -311,11 +378,11 @@ namespace xploder_psx
     // Type 5 or Type 6 size field.
     //
     // Type 5 stores a direct payload byte count (1..0x0FFF).
-    // Type 6 stores the number of payload bytes that follow the first two
-    // payload bytes carried inline after the breakpoint mask. Therefore the
-    // actual payload byte count is sizeField + 2. Its following rows begin with
-    // ten descriptor bytes: break address/type (6) + break mask (4). The first
-    // two payload bytes share the row containing the mask.
+    // Type 6 also stores the direct logical payload byte count. Its following
+    // rows begin with ten descriptor bytes: break address/type (6) + break mask
+    // (4). The first two payload bytes share the row containing the mask.
+    // The installed engine copies Type 6 payloads as 32-bit words, so runtime
+    // execution rounds the declared byte count up to the next four-byte boundary.
     inline bool trySetMassWriteLayout(MassWriteInfo& info, bool isType6, int sizeField) noexcept
     {
         info.isType6 = isType6;
@@ -326,10 +393,8 @@ namespace xploder_psx
             if (sizeField < 0 || sizeField > 0xFFFF)
                 return false;
 
-            info.payloadByteCount = sizeField + 2;
-            // Loader-active length includes the 6-byte Type 6 header, the
-            // 10-byte breakpoint descriptor, and the two inline payload bytes.
-            info.runtimePayloadSize = sizeField + 0x12;
+            info.payloadByteCount = sizeField;
+            info.runtimePayloadSize = (sizeField + 3) & ~3;
             info.sourcePayloadSize = info.payloadByteCount + 0x0A;
         }
         else
@@ -338,7 +403,7 @@ namespace xploder_psx
                 return false;
 
             info.payloadByteCount = sizeField;
-            info.runtimePayloadSize = sizeField + 0x06;
+            info.runtimePayloadSize = sizeField;
             info.sourcePayloadSize = info.payloadByteCount;
         }
 
@@ -348,16 +413,70 @@ namespace xploder_psx
         return info.payloadLineCount > 0;
     }
 
+    // Return the exact role and meaningful-byte range for one row following
+    // a Type 5 or Type 6 header. The stored row remains six bytes even when the
+    // final row contains padding; padding is ignored only when reconstructing
+    // the logical payload.
+    inline bool tryGetMassWriteRowContext(
+        const MassWriteInfo& info,
+        int rowIndex,
+        MassWriteRowContext& context) noexcept
+    {
+        context = {};
+        if (rowIndex < 0 || rowIndex >= info.payloadLineCount)
+            return false;
+
+        context.rowIndex = rowIndex;
+        context.sourceByteOffset = rowIndex * static_cast<int>(CodeLength);
+        context.sourceBytesUsed = std::min(
+            static_cast<int>(CodeLength),
+            std::max(0, info.sourcePayloadSize - context.sourceByteOffset));
+        context.paddingBytes =
+            static_cast<int>(CodeLength) - context.sourceBytesUsed;
+
+        if (!info.isType6)
+        {
+            context.role = MassWriteRowRole::Type5Payload;
+            context.payloadByteOffset = context.sourceByteOffset;
+            context.payloadBytesUsed = std::min(
+                context.sourceBytesUsed,
+                std::max(0, info.payloadByteCount - context.payloadByteOffset));
+            return true;
+        }
+
+        if (rowIndex == 0)
+        {
+            context.role = MassWriteRowRole::Type6BreakpointDescriptor;
+            return true;
+        }
+
+        if (rowIndex == 1)
+        {
+            context.role = MassWriteRowRole::Type6MaskAndInlinePayload;
+            context.payloadByteOffset = 0;
+            context.payloadBytesUsed = std::min(2, info.payloadByteCount);
+            return true;
+        }
+
+        context.role = MassWriteRowRole::Type6Payload;
+        context.payloadByteOffset =
+            2 + (rowIndex - 2) * static_cast<int>(CodeLength);
+        context.payloadBytesUsed = std::min(
+            static_cast<int>(CodeLength),
+            std::max(0, info.payloadByteCount - context.payloadByteOffset));
+        return true;
+    }
+
     // Parse a decrypted/public Type 5 or Type 6 header.
     //
     // Canonical external RAW size fields:
     //   Type 5: nnn is the direct number of payload bytes after the header.
-    //   Type 6: nnnn is the number of payload bytes after the first two
-    //           inline payload bytes; actual data bytes are nnnn+2. The rows
-    //           also contain the 10-byte breakpoint descriptor described above.
+    //   Type 6: nnnn is the direct logical payload-byte count. The first two
+    //           bytes are stored inline beside the breakpoint mask, and the
+    //           source rows also contain the fixed 10-byte breakpoint descriptor.
     //
-    // The loader may expand these values internally by +0x06 (Type 5) or
-    // +0x12 (Type 6), but those runtime values are never exported as RAW.
+    // Type 6 runtime installation rounds the payload count up to whole words,
+    // but the original external size field is retained in RAW output.
     inline bool tryGetMassWriteInfoFromPublicHeader(const Code& publicHeader, MassWriteInfo& info) noexcept
     {
         info = {};
@@ -405,7 +524,7 @@ namespace xploder_psx
 
         // Type 5 public headers store the payload key in the high nibble of the
         // size word. Canonical RAW headers are keyless and show the exact byte
-        // count directly. Type 6 already stores its continuation-byte count directly.
+        // count directly. Type 6 also stores its logical payload-byte count directly.
         if (!info.isType6)
         {
             header[4] = byte(info.payloadSize >> 8);
@@ -481,11 +600,25 @@ namespace xploder_psx
         for (int i = 0; i < info.payloadLineCount; ++i)
         {
             Code payload = input[static_cast<std::size_t>(1 + i)];
+            MassWriteRowContext context;
+            if (!tryGetMassWriteRowContext(info, i, context))
+                return false;
+
             if (info.payloadKey == 6 || info.payloadKey == 7)
             {
                 decryptPayloadChunk(payload, info.payloadKey);
                 if (!info.isType6)
                     swapType5PayloadByteOrder(payload);
+            }
+            else if (info.isType6 &&
+                     context.role == MassWriteRowRole::Type6BreakpointDescriptor)
+            {
+                (void)decryptCode(payload);
+            }
+            else if (info.isType6 &&
+                     context.role == MassWriteRowRole::Type6Payload)
+            {
+                (void)decryptType6EscapedPayloadRow(payload);
             }
             output.push_back(payload);
         }
@@ -534,11 +667,29 @@ namespace xploder_psx
         for (int i = 0; i < payloadLineCount; ++i)
         {
             Code payload = input[static_cast<std::size_t>(1 + i)];
+            MassWriteRowContext context;
+            if (!tryGetMassWriteRowContext(layout, i, context))
+                return false;
+
             if (payloadKey == 6 || payloadKey == 7)
             {
                 if (!isType6)
                     swapType5PayloadByteOrder(payload);
                 encryptPayloadChunk(payload, payloadKey);
+            }
+            else if (isType6 &&
+                     context.role == MassWriteRowRole::Type6BreakpointDescriptor &&
+                     (payload[0] & 0xF0U) == 0x80U)
+            {
+                if (!encryptCode(payload, normalLineKey))
+                    return false;
+            }
+            else if (isType6 &&
+                     context.role == MassWriteRowRole::Type6Payload &&
+                     payload[0] == 0x08U)
+            {
+                if (!encryptType6EscapedPayloadRow(payload, normalLineKey))
+                    return false;
             }
             output.push_back(payload);
         }

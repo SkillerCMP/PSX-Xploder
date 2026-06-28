@@ -8,11 +8,11 @@ Xploder PSX Converter README
 
 ### Native Windows conversion tools for PlayStation 1 cheat-code formats
 
-![Platform](https://img.shields.io/badge/platform-Windows-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%207%2B-blue)
 ![Language](https://img.shields.io/badge/language-C%2B%2B17-blue)
 ![Build](https://img.shields.io/badge/build-MSVC-green)
 ![License](https://img.shields.io/badge/license-GPLv3-red)
-![Version](https://img.shields.io/badge/version-v1.04-brightgreen)
+![Version](https://img.shields.io/badge/version-v1.05-brightgreen)
 
 <a href="https://github.com/SkillerCMP/PSX-Xploder/releases">
   <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/SkillerCMP/PSX-Xploder/total?style=social">
@@ -43,6 +43,39 @@ The project includes Xploder encryption/decryption, structured Type 5 and Type 6
 ---
 
 <details open>
+<summary><strong>🦈 v1.05 — GameShark Pro 3.1, Datel ROM Import, and DuckStation Source Update</strong></summary>
+
+<br>
+
+Version 1.05 validates the classic GameShark / Action Replay parser against the decrypted GameShark Pro 3.1 runtime handler.
+
+- `D2` and `E2` are now modeled correctly as **less than or equal**, not strict less-than.
+- `D3` and `E3` remain strict **greater than** comparisons.
+- `D4xxxxxx` is recognized as a GameShark controller-state comparison; the encoded address field is ignored and output is canonicalized to `D4000000`.
+- `D5` and `D6` are retained as GameShark menu/control rows instead of being mislabeled as ordinary “codes on/off” operations.
+- Type `50` repeaters now reject a zero count because the verified firmware loop would underflow.
+- Type `C2` byte-copy blocks accept the firmware's actual destination-carrier behavior and canonicalize the second row to `80...... 0000`.
+- Generated C2 blocks are limited to safe lengths from `0001` through `FFFF`.
+- Datel v2.x and v3.x encrypted ROM images are now recognized and decrypted from their file contents before database extraction. The filename and `.enc` extension are not required.
+- Successful Datel imports are accepted only when the decrypted image contains a complete, structurally valid AR/GS database, reducing false-positive binary detection.
+- DuckStation input/output is now aligned with the current DuckStation source interpreter instead of assuming every familiar GameShark prefix has identical behavior.
+- DuckStation `D2/E2` are modeled as strict unsigned **less than**, while physical GameShark Pro 3.1 `D2/E2` remain **less than or equal** in the GameShark parser.
+- DuckStation Type `1F` is handled as a **16-bit scratchpad write**.
+- Classic Type `50` accepts DuckStation Type `90` 32-bit followers, and Type `53` preserves `31/32`, `81/82`, and `91/92` bit-set/bit-clear followers.
+- DuckStation zero-count Type `50` and `C2` rows are retained as safe no-ops; the physical GameShark parser still warns on the verified underflowing zero-count forms.
+- DuckStation `C2` accepts any following row as the destination-address carrier and canonicalizes it safely on output.
+- DuckStation `D5/D6`, `A4`, and `C3-C6` are recognized as bounded block conditions rather than GameShark menu controls or ordinary one-row comparisons.
+- `Type = Assembly`, `Activation = Manual/EndFrame`, `Option`, `OptionRange`, `DisallowForAchievements`, and `Ignore` metadata are preserved during DuckStation round trips.
+- Complex DuckStation-only structures such as `51`, `52`, `D7`, `F0-F6`, and Assembly bodies are preserved verbatim when no exact cross-device translation exists.
+
+See [`GAMESHARK_PRO_3.1_CODE_TYPES.md`](GAMESHARK_PRO_3.1_CODE_TYPES.md) for the verified mapping and conversion policy.
+See [`DUCKSTATION_CODE_TYPES.md`](DUCKSTATION_CODE_TYPES.md) for the source-derived DuckStation mapping and preservation policy.
+
+</details>
+
+---
+
+<details open>
 <summary><strong>✨ Main Features</strong></summary>
 
 <br>
@@ -56,10 +89,14 @@ The project includes Xploder encryption/decryption, structured Type 5 and Type 6
 - PS1 MIPS I assembly, disassembly, and exact data-directive preservation.
 - Nested CMP group and subgroup support.
 - GameShark Type 5 serial-repeater condensation and expansion.
-- DuckStation `80 + 80 -> 90` write combining.
+- Optional Xploder Type B slider generation from GameShark Type 5 or compatible write runs.
+- DuckStation and Caetla `80 + 80 -> 90` write combining.
+- X-Link output formatting for quoted names and `$`-prefixed Xploder code rows.
 - DuckStation `D0 / 70 -> C0` activator-block condensation.
 - Reverse expansion of DuckStation `C0` blocks to GameShark `D0` or Xploder Type `7`.
 - CMP-compatible names, credits, and `$` code-line formatting.
+- Legacy database import from encrypted/decrypted Xploder ROMs, full Action Replay/GameShark ROMs, Datel v2.x/v3.x encrypted firmware images, and standalone AR/GS code-database files.
+- Automatic content- and structure-based import detection regardless of whether a Datel image is named `.ENC`, `.BIN`, `.ROM`, `.DAT`, or has no extension.
 - Folder drag-and-drop batch cleanup and Xploder decryption.
 - UTF-8, UTF-16, ANSI, LF, CRLF, and browser/chat line-ending support.
 - Persistent program settings.
@@ -98,16 +135,19 @@ The converter uses semantic operations instead of changing only the first hexade
 Supported operations include:
 
 - 8-bit, 16-bit, and 32-bit writes
-- equal and not-equal comparisons
+- equal, not-equal, less-than-or-equal, and greater-than comparisons
 - increment and decrement operations
 - copy-memory blocks
 - GameShark serial repeaters
+- Xploder Type B serial sliders
 - DuckStation conditional writes
 - DuckStation block activators
 - Xploder Type 5 mass-write expansion
 - Xploder Type 6 structured payloads
-- Caetla-native arithmetic types
+- Caetla 0.34 native writes plus optional Caetla `.341` arithmetic, C2 block copy, and C3 indirect-write output
 - wildcard-preserving structural conversions
+- Action Replay/GameShark `C0` global equal/on conditions are preserved as their own semantic operation.
+- Scratchpad rows retain their source-family width: DuckStation Type `1F` is 16-bit, while verified 8-bit scratchpad forms remain 8-bit where the source format defines them that way.
 
 Examples:
 
@@ -125,8 +165,11 @@ DuckStation                     GameShark / Action Replay
 
 ```text
 Caetla                          DuckStation
-10012345 0005              ->   20012345 0005
-12012348 00001000               60012348 00001000
+FFFFFFFF 00000001          ->   10012345 0005
+10012345 0005                   20012348 0001
+20012348 0001                   9001234C 12345678
+FFFFFFFF 00000000
+9001234C 12345678
 ```
 
 When no exact destination equivalent exists, the converter preserves the original code with a clear warning instead of silently guessing or deleting it.
@@ -160,7 +203,7 @@ j     0x800D0A44
 nop
 ```
 
-The special `: Hook` form writes the first `j`/`jal` at the declared hook address, then continues assembling at that numeric jump target. For explicit control, `.org` can be used for every region.
+The special `: Hook` form writes the first `j`/`jal` at the declared hook address, then continues assembling at that numeric jump target. For explicit control, `.org` can be used for every region. Address `0x00000000` is a valid `.org` value and is preserved when assembling code or data.
 
 DuckStation output:
 
@@ -173,7 +216,7 @@ DuckStation output:
 9000FF2C 00000000
 ```
 
-GameShark, Caetla, and Xploder output use paired 16-bit writes where required.
+GameShark and Xploder output use paired 16-bit writes where required. Caetla and DuckStation use native Type `90` 32-bit writes.
 
 When **PS1 MIPS** is selected as the Output Type, the converter reconstructs 32-bit opcodes from:
 
@@ -181,6 +224,22 @@ When **PS1 MIPS** is selected as the Output Type, the converter reconstructs 32-
 - consecutive GameShark/Caetla/Xploder Type `80` writes at `A` and `A+2`
 - canonical Xploder Type 5 payload bytes
 - Xploder Encrypted Type 5 blocks after decryption
+- structured Xploder Type 6 executable payloads after decryption
+
+For Type 6, the breakpoint descriptor and mask remain metadata while the executable bytes are reconstructed from the inline payload and continuation rows. The Xploder engine installs the rounded executable at `0x80000040`, so MIPS output emits that region with `.org 0x80000040`. A preceding Type `7` or Type `9` installation guard is retained as a comment rather than misinterpreted as an instruction.
+
+Example Type 6 MIPS output begins as:
+
+```asm
+# Xploder Type 9 installation guard: execute the following Type 6 block when [0x80000040] != 0x27BD
+# Xploder Type 6 breakpoint address: 0x801FAB92 | control: 0xEA80
+# Xploder Type 6 executable installed at 0x80000040 (64 bytes)
+
+.org 0x80000040
+
+addiu $sp, $sp, -12
+sw    $a0, 0x0004($sp)
+```
 
 Output is organized into `.org` regions and includes calculated branch and jump targets.
 
@@ -286,11 +345,16 @@ Metadata rules:
 - Text inside `{...}` becomes `Description`.
 - `%Credits:` becomes `Author`.
 - `%Credits:` takes priority over an inline `by Name`.
-- `Type = Gameshark` is always emitted.
-- `Activation = EndFrame` is always emitted.
+- Generated sections default to `Type = Gameshark` and `Activation = EndFrame`.
+- Existing DuckStation sections preserve `Type = Gameshark` or `Type = Assembly`.
+- Existing DuckStation sections preserve `Activation = Manual` or `Activation = EndFrame`.
+- `Option =`, `OptionRange =`, `DisallowForAchievements =`, and `Ignore =` properties are retained.
+- Assembly bodies, labels, instructions, wildcards, and comments are preserved during DuckStation-to-DuckStation normalization.
 - Code-only input uses `[Unnamed Cheat]`.
 
 DuckStation-to-DuckStation conversion also rebuilds nonstandard CMP-style headings into canonical DuckStation sections.
+
+DuckStation-specific rows that have no exact physical-device equivalent are kept as DuckStation rows for same-format output. When converting elsewhere, the converter emits a warning and preserves the original rows as comments instead of allowing a conditional body to become unconditional.
 
 </details>
 
@@ -371,7 +435,7 @@ Consecutive patches sharing the same path stay inside one open group.
 
 <br>
 
-### DuckStation: combine adjacent Type 80 writes
+### DuckStation and Caetla: combine adjacent Type 80 writes
 
 When enabled:
 
@@ -400,6 +464,79 @@ becomes:
 ```text
 9000C03C 240B????
 ```
+
+
+### Caetla 0.34 native output
+
+Caetla output now follows the handlers mapped directly from `CAETLA.BIN` rather than treating every familiar prefix as an ordinary GameShark row.
+
+Native output includes:
+
+```text
+30                  8-bit write
+80                  16-bit write
+90                  32-bit write
+B                   native serial slider
+50 / 51 / 52        set bits (8 / 16 / 32-bit)
+58 / 59 / 5A        clear bits (8 / 16 / 32-bit)
+70 / 71 / 72        copy byte / halfword / word
+D0-D3 / E0-E3       16-bit / 8-bit conditions
+1F800xxx             scratchpad 8-bit write
+```
+
+The **Condense Writes / GS Type 5 -> Type B Slider** option emits native Caetla Type B rows. It supports byte, halfword, and word seeds, up to `0xFFF` writes, a `0xFFFF` address step, and a 32-bit value step.
+
+Caetla 0.34 arithmetic rows use the firmware's persistent GameShark-compatible interpreter. The converter now adds the required mode rows automatically:
+
+```text
+FFFFFFFF 00000001   ; GameShark-compatible mode
+10012345 0001       ; increment 16-bit
+FFFFFFFF 00000000   ; return to native Caetla mode
+```
+
+Unsupported assumptions from the earlier output path are no longer generated as if they were confirmed Caetla 0.34 types. In particular, 32-bit increment/decrement, `D4-D6` control rows, and `.341`-only `C2/C3` output are not generated while 0.34-safe output is selected.
+
+### Caetla .341 extended output
+
+Under **Options > Current Output**, Caetla output now has a separate:
+
+```text
+Caetla .341 Extended Types
+```
+
+The option is off by default so existing Caetla 0.34 output remains unchanged. Input parsing recognizes `.341` rows automatically.
+
+When enabled, arithmetic uses native `.341` rows without a GameShark-mode selector:
+
+```text
+10  8-bit increment
+11  16-bit increment
+12  32-bit increment
+20  8-bit decrement
+21  16-bit decrement
+22  32-bit decrement
+```
+
+The option also enables the two-line `.341` formats:
+
+```text
+C2XXXXXX ZZZZ        Copy 0001-FFFF bytes from XXXXXX
+80YYYYYY 0000        Destination YYYYYY
+
+C3XXXXXX 000Z        Load a pointer from XXXXXX
+9100YYYY DDDDDDDD    Add signed offset YYYY and store DDDDDDDD
+
+C3 width selectors: 0000 = 8-bit, 0001 = 16-bit, 0003 = 32-bit
+```
+
+For example:
+
+```text
+C308C6B8 0001
+91000022 000003E8
+```
+
+is preserved as one Caetla indirect-write operation and round-trips without the `91` row being mistaken for an ordinary Type `9` write. C3 pair recognition also remains active after a persistent GameShark-mode selector. The verified binary uses selector `0003` for 32-bit C3 writes; `0002` is not emitted as a valid width. Zero-count C2 blocks are preserved when encountered but are not generated. See `CAETLA_0.341_CODE_TYPES.md` for the complete mapping and compatibility notes.
 
 ### DuckStation: condense equal activators
 
@@ -466,7 +603,28 @@ value step
 
 At least three compatible writes are required.
 
-When a GameShark, DuckStation, or Caetla Type 5 repeater is converted to Xploder, it is expanded into individual Type `3` or Type `8` writes first because GameShark Type 5 and Xploder Type 5 are different formats.
+By default, a GameShark, DuckStation, or Caetla GameShark-mode Type 5 repeater converted to Xploder is expanded into individual Type `3` or Type `8` writes because GameShark Type 5 and Xploder Type 5 are different formats.
+
+For **Xploder RAW** or **Xploder Encrypted** output, enable:
+
+```text
+Options > Current Output > Auto CodeType Conversion
+  Condense Writes / GS Type 5 -> Type B Slider
+```
+
+This maps compatible 16-bit repeaters to the native Xploder Type B slider:
+
+```text
+GameShark:
+50000302 0001
+80010000 0005
+
+Xploder RAW:
+B0030002 0001
+10010000 0005
+```
+
+Type B stores an 8-bit repeat count, a signed 16-bit address step, and a signed 16-bit value step. The generated base row uses Type `1`, which supplies the starting address/value to the Type B handler without becoming a second normal write. Only aligned 16-bit runs are condensed; byte writes, odd addresses/steps, wildcard values, and fields outside the Type B limits remain expanded.
 
 </details>
 
@@ -539,6 +697,8 @@ The same self-inverse transformation is applied before encryption.
 
 The converter keeps loader-only expanded sizes internal and exports the canonical external RAW size.
 
+The decryptor is **Type 5 block-aware**. After a valid Type 5 header is read, the declared payload length owns the required following rows. A payload row is never sent through normal top-level code-type detection merely because its first nibble resembles an encrypted write, conditional, Type 5, or Type 6 header. The full final six-byte row is preserved for exact round trips; only bytes beyond the declared payload length are treated as logical padding when extracting the payload.
+
 </details>
 
 ---
@@ -550,22 +710,27 @@ The converter keeps loader-only expanded sizes internal and exports the canonica
 
 Type 6 is a breakpoint/bootstrap structure.
 
-The size field counts payload bytes after the first two payload bytes stored beside the breakpoint mask:
+The size field is the direct logical payload-byte count. The first two
+payload bytes share the row containing the breakpoint mask:
 
 ```text
-totalPayloadBytes = sizeField + 2
-sourceRows = ceil((0x0A + totalPayloadBytes) / 6)
+logicalPayloadBytes = sizeField
+sourceRows = ceil((0x0A + logicalPayloadBytes) / 6)
+runtimeCopiedBytes = align_up(logicalPayloadBytes, 4)
 ```
 
 Examples:
 
 ```text
-000C -> 14 payload bytes, 4 source rows
-003F -> 65 stored payload bytes, 13 source rows
-0000 -> 2 inline payload bytes, 2 source rows
+000C -> 12 logical payload bytes, 4 source rows, 12 runtime bytes
+003F -> 63 logical payload bytes, 13 source rows, 64 runtime bytes
+0000 ->  0 logical payload bytes, 2 fixed descriptor rows
 ```
 
-The original external size field is preserved in RAW output.
+The original external size field is preserved in RAW output. The runtime
+engine copies Type 6 payloads as 32-bit words, so bytes beyond the logical
+length may still complete the final rounded word. Stored six-byte rows are
+therefore always preserved exactly.
 
 A Type 5 header following Type 6 is parsed as the next structured block, not as Type 6 payload.
 
@@ -579,6 +744,65 @@ Context-aware annotations identify:
 - embedded records inside Type 6 data
 
 Rows inside Type 6 are not reclassified only because their first digit resembles another code type.
+
+Keyless Type 6 blocks also support the two structures verified in the German
+Xploder ROM database:
+
+- the breakpoint descriptor may be stored as one ordinary encrypted Xploder line;
+- an escaped payload row such as `0E569755 5D5A` decodes to
+  `08004003 0C00`, retaining the literal `08` payload byte.
+
+The inverse rules are applied during encryption, allowing the original block
+to round-trip exactly when the matching normal encryption key is selected.
+
+The decryptor now uses one shared row-context model for the complete Type 6 block:
+
+```text
+header
+breakpoint descriptor
+breakpoint mask + first inline payload bytes
+remaining length-controlled payload rows
+```
+
+This means payload rows beginning with values such as `9`, `E`, `5`, `6`, or `B` remain Type 6 data. The declared block length determines ownership and the exact next top-level code boundary. Stored rows always remain six bytes so decrypt/encrypt round trips retain final-row padding exactly.
+
+</details>
+
+---
+
+<details>
+<summary><strong>📥 Legacy Cartridge Database Import</strong></summary>
+
+<br>
+
+The **File** menu includes:
+
+```text
+File
+  Import
+    Xploder ROM
+    AR/GS / Datel ROM / Code Database
+```
+
+**Xploder ROM** accepts encrypted `.FCD` images and already-decrypted `.ROM` images. The importer decrypts the ROM when required, locates its internal game/code database, and loads the extracted encrypted Xploder code list into the Input pane. The Input Type is switched automatically to **Xploder Encrypted**.
+
+**AR/GS / Datel ROM / Code Database** accepts full cartridge ROM dumps, standalone code-list files, and Datel v2.x/v3.x encrypted firmware images. The importer examines the file contents and scans for a structurally valid database rather than depending on the filename, extension, or one hard-coded offset.
+
+For an encrypted Datel image, the importer first checks the original bytes, then tries the appropriate v2.x/v3.x in-memory decryption paths. A decrypted result is accepted only when its database records, names, counts, byte order, and boundaries validate successfully. A v3 content marker is used only to choose the first decryption attempt; it is never treated as sufficient proof by itself.
+
+The importer extracts game names, code names, master/auto-activation entries where present, and stored code rows, then switches the Input Type to **GameShark / Action Replay**. Control-only legacy names are accepted safely instead of causing the complete database to be rejected.
+
+Imported text uses the converter's normal structured format:
+
+```text
+^3 = NAME: Game Name
++Code Name
+$80012345 0063
+```
+
+The Input pane auto-detects supported binary formats during drag-and-drop. Extensions are only conveniences in the file-selection dialog; they do not control recognition. For example, the same Datel image can be imported as any of these names:
+
+Detection validates the decrypted database structure, including record counts, names, alignment, line lengths, byte order, boundaries, and the padding area following the database. If the file is not a recognized binary database, normal text-file loading is attempted instead. The status line reports whether Datel v2.x/v3.x decryption was used, the detected layout, number of games, code entries, code rows, and source filename.
 
 </details>
 
@@ -675,6 +899,43 @@ The divider between Input and Output can be dragged. The divider position previe
 ---
 
 <details>
+<summary><strong>🔗 X-Link Format for Xploder Output</strong></summary>
+
+<br>
+
+Xploder RAW and Xploder Encrypted output now provide:
+
+```text
+Options > Current Output > X-Link Format
+```
+
+When enabled, one matching pair of double quotes is removed from each code name and every hexadecimal code row receives exactly one `$` prefix.
+
+Input:
+
+```text
+"Infinite Health"
+80123456 CDEF
+80123458 89AB
+```
+
+X-Link output:
+
+```text
+Infinite Health
+$80123456 CDEF
+$80123458 89AB
+```
+
+A name is changed only when both its first and last characters are double quotes. Interior quotation marks are preserved. Existing `$` prefixes are not duplicated. Comments, credits, group directives, and other metadata lines remain unchanged.
+
+X-Link Format is an alternative presentation style to CMP DB Compatible Output for Xploder output. While X-Link Format is enabled, code names remain plain rather than receiving the CMP `+` prefix. Code conversion and encryption are unchanged.
+
+</details>
+
+---
+
+<details>
 <summary><strong>⚙️ Persistent Options Menu</strong></summary>
 
 <br>
@@ -709,6 +970,8 @@ The submenu changes based on the selected Output Type.
 #### Xploder Encrypted
 
 ```text
+X-Link Format
+
 Group Encrypted 4-4-4
 
 Encryption Key
@@ -720,6 +983,10 @@ Encryption Key
 Type 5 Payload Key
   Key 6
   Key 7
+
+Auto CodeType Conversion
+  Condense Writes / GS Type 5 -> Type B Slider
+  Pack PS1 MIPS -> Type 5
 ```
 
 #### GameShark / Action Replay
@@ -742,12 +1009,19 @@ Auto CodeType Conversion
 
 ```text
 Auto CodeType Conversion
-  Condense Writes -> Type 5
+  80 + 80 -> 90
+  Condense Writes / GS Type 5 -> Type B Slider
 ```
 
 #### Xploder RAW
 
-No output-specific settings are required.
+```text
+X-Link Format
+
+Auto CodeType Conversion
+  Condense Writes / GS Type 5 -> Type B Slider
+  Pack PS1 MIPS -> Type 5
+```
 
 Settings are saved beside the executable:
 
@@ -761,6 +1035,7 @@ Persisted values include:
 - Output Type
 - Auto Convert
 - annotation state
+- X-Link Format state
 - CMP output state
 - encryption key
 - Type 5 payload key
@@ -801,6 +1076,7 @@ src/XploderCodeTypes.hpp
 src/DuckStationCodeTypes.hpp
 src/CaetlaCodeTypes.hpp
 src/MultiFormatCodeConverter.hpp
+src/Ps1MipsCodeTypes.hpp
 ```
 
 This keeps device-specific meanings separate.
@@ -825,7 +1101,11 @@ because their meanings differ between Caetla and GameShark / Action Replay.
 
 <br>
 
-The project is intended to build with **Microsoft Visual C++ / MSVC**.
+The project is intended to build with **Microsoft Visual C++ / MSVC** and now produces one executable path compatible with **Windows 7 and newer Windows versions**.
+
+The source no longer uses `std::filesystem`. File and folder operations use Windows 7-compatible Win32 APIs, the C/C++ runtime is linked statically, and the linker subsystem is set to Windows 7 (`6.01`). The build also checks the finished executable for known Windows 8+ imports such as `CreateFile2`.
+
+Use **Visual Studio 2026 Build Tools** with the **Desktop development with C++** workload. The full Visual Studio IDE is not required.
 
 Run:
 
@@ -847,11 +1127,16 @@ build.cmd win32
 build.cmd win64
 ```
 
-The script attempts to locate and initialize the Visual Studio Developer Command Prompt automatically.
+The script locates a Visual Studio 2026 C++ toolchain automatically. The generated filenames remain unchanged:
+
+```text
+XploderConverterGui-Win32.exe
+XploderConverterGui-Win64.exe
+```
+
+A GitHub Actions workflow is also included at `.github/workflows/build-windows.yml`. It can build both executables on GitHub without installing Visual Studio locally.
 
 </details>
-
----
 
 <details>
 <summary><strong>▶️ Basic Usage</strong></summary>
@@ -859,9 +1144,9 @@ The script attempts to locate and initialize the Visual Studio Developer Command
 <br>
 
 1. Open `XploderConverterGui.exe`.
-2. Select the Input Type.
-3. Select the Output Type.
-4. Paste code text into Input or drop one text file.
+2. Select the Input Type and Output Type for text conversion.
+3. Paste code text, drop a supported file onto Input, or use `File > Import`.
+4. For cartridge databases, choose **Xploder ROM** or **AR/GS v1.XX**; the Input Type is selected automatically.
 5. Configure output-specific options under `Options > Current Output`.
 6. Convert the code.
 7. Copy the result from Output.
@@ -887,14 +1172,13 @@ GameShark Type 5 serial repeater
 Xploder Type 5 mass-write payload
 ```
 
-Caetla supports many standard GameShark / Action Replay codes, but some Caetla-specific prefixes conflict with GameShark meanings.
+Caetla 0.34 has separate native and GameShark-compatible interpreters. Caetla `.341` additionally defines native arithmetic plus C2/C3 extended rows; the dedicated output option controls whether those newer rows may be generated. The rows `FFFFFFFF 00000001` and `FFFFFFFF 00000002` select GameShark-compatible mode; `FFFFFFFF 00000000` and `FFFFFFFF 00000003` return to native mode. The selection persists until another mode row is encountered.
 
-The converter therefore keeps the selected Input Type explicit and uses family-specific parsers.
+Some prefixes therefore have different meanings depending on the active interpreter. For example, native `50` sets bits, while GameShark-mode `50` is a serial repeater header. The converter keeps the selected Input Type explicit and tracks Caetla interpreter mode while parsing and emitting.
 
 </details>
 
 ---
-
 <details>
 <summary><strong>🙏 Credits and Thanks</strong></summary>
 
@@ -902,17 +1186,35 @@ The converter therefore keeps the selected Input Type explicit and uses family-s
 
 ### misfire
 
-GitHub: https://github.com/mlafeldt
+GitHub: [mlafeldt](https://github.com/mlafeldt)
 
-Thank you for the original `xpcrypt` work and for long-standing contributions to the PlayStation cheat and hacking scene.
+Thank you for the original `xpcrypt` work and for your long-standing contributions to the PlayStation cheat-code and hacking community.
 
 ### Parasyte
 
-Thank you for contributions to the PlayStation hacking and cheat-code community.
+Thank you for your contributions to the PlayStation hacking and cheat-code community.
+
+### Connor McLaughlin (stenzek)
+
+GitHub: [stenzek/duckstation](https://github.com/stenzek/duckstation)
+
+Thank you for the continued development of DuckStation and for making its source code available as a valuable technical reference for PlayStation emulation and cheat-code research.
+
+### szalay
+
+Thus...Thank you for the extensive testing, feedback, and help refining the program into a more reliable and practical tool.
+
+### Lee4
+
+Thank you for reminding me about the little details and features I had forgotten from the old PlayStation 1 days. 😄
+
+### GameHacking.org
+
+Thank you for the many years of contributions, documentation, code archives, and technical information provided to the game-hacking community.
 
 ### Scene and Preservation Community
 
-This project builds on the broader work of researchers who documented, tested, preserved, and shared knowledge about PlayStation cheat devices and code formats.
+This project builds upon the work of the many researchers, developers, testers, and preservationists who have documented, tested, preserved, and shared knowledge about PlayStation cheat devices, firmware, encryption methods, and code formats.
 
 </details>
 
@@ -946,6 +1248,6 @@ See the repository `LICENSE` file for the complete license text.
 
 <div align="center">
 
-**Xploder PSX Converter v1.04**
+**Xploder PSX Converter v1.05**
 
 </div>

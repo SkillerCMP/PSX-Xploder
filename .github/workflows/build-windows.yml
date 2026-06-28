@@ -1,0 +1,41 @@
+name: Build Windows 7 Compatible EXEs
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/**"
+      - "build.cmd"
+      - ".github/workflows/build-windows.yml"
+  pull_request:
+    paths:
+      - "src/**"
+      - "build.cmd"
+      - ".github/workflows/build-windows.yml"
+
+jobs:
+  build:
+    runs-on: windows-2022
+    env:
+      CI: "true"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build Win32
+        shell: cmd
+        run: build.cmd win32
+
+      - name: Build Win64
+        shell: cmd
+        run: build.cmd win64
+
+      - name: Upload Windows 7-compatible executables
+        uses: actions/upload-artifact@v6
+        with:
+          name: PSX-Xploder-v1.05-Windows
+          path: |
+            XploderConverterGui-Win32.exe
+            XploderConverterGui-Win64.exe
+          if-no-files-found: error

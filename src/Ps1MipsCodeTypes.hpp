@@ -26,6 +26,7 @@ namespace psx_code_types
             std::vector<std::uint8_t> data;
             std::vector<std::uint16_t> halfData;
             std::uint32_t address = 0;
+            bool addressValid = false;
             std::size_t lineNumber = 0;
         };
 
@@ -631,6 +632,7 @@ namespace psx_code_types
                         followHookJumpTarget = false;
                         record.kind = SourceRecord::Kind::Org;
                         record.address = pc;
+                        record.addressValid = true;
                     }
                     records.push_back(std::move(record));
                     continue;
@@ -648,6 +650,7 @@ namespace psx_code_types
                         havePc = true;
                         record.kind = SourceRecord::Kind::Org;
                         record.address = pc;
+                        record.addressValid = true;
                         followHookJumpTarget = lower(right) == "hook";
                         if (!right.empty())
                             labels[lower(right)] = pc;
@@ -664,6 +667,7 @@ namespace psx_code_types
                         record.kind = SourceRecord::Kind::Label;
                         record.label = left;
                         record.address = pc;
+                        record.addressValid = havePc;
                         records.push_back(std::move(record));
                         if (right.empty())
                             continue;
@@ -672,6 +676,7 @@ namespace psx_code_types
                         instructionRecord.original = original;
                         instructionRecord.text = right;
                         instructionRecord.address = pc;
+                        instructionRecord.addressValid = havePc;
                         instructionRecord.lineNumber = i + 1U;
                         std::string directiveError;
                         if (parseByteDirective(right, instructionRecord.data, directiveError))
@@ -688,7 +693,7 @@ namespace psx_code_types
                             if ((pc & 1U) != 0U)
                             {
                                 errors.push_back("Line " + std::to_string(i + 1U) + ": .half address is not 2-byte aligned");
-                                instructionRecord.address = 0;
+                                instructionRecord.addressValid = false;
                             }
                             if (!directiveError.empty())
                                 errors.push_back("Line " + std::to_string(i + 1U) + ": " + directiveError);
@@ -701,7 +706,7 @@ namespace psx_code_types
                             if ((pc & 3U) != 0U)
                             {
                                 errors.push_back("Line " + std::to_string(i + 1U) + ": instruction/.word address is not 4-byte aligned");
-                                instructionRecord.address = 0;
+                                instructionRecord.addressValid = false;
                             }
                             pc += 4U;
                         }
@@ -722,20 +727,21 @@ namespace psx_code_types
                 if (!havePc)
                 {
                     errors.push_back("Line " + std::to_string(i + 1U) + ": instruction/data requires .org or '0xADDRESS : Label'");
-                    record.address = 0;
+                    record.addressValid = false;
                 }
                 else
                 {
                     record.address = pc;
+                    record.addressValid = true;
                     if (isHalf && (pc & 1U) != 0U)
                     {
                         errors.push_back("Line " + std::to_string(i + 1U) + ": .half address is not 2-byte aligned");
-                        record.address = 0;
+                        record.addressValid = false;
                     }
                     else if (!isByte && !isHalf && (pc & 3U) != 0U)
                     {
                         errors.push_back("Line " + std::to_string(i + 1U) + ": instruction/.word address is not 4-byte aligned");
-                        record.address = 0;
+                        record.addressValid = false;
                     }
                     const std::size_t byteCount = isByte
                         ? (record.data.empty() ? 1U : record.data.size())
@@ -790,7 +796,7 @@ namespace psx_code_types
 
             for (const SourceRecord& record : records)
             {
-                if (record.address == 0)
+                if (!record.addressValid)
                     continue;
 
                 if (record.kind == SourceRecord::Kind::Byte)
@@ -1043,9 +1049,38 @@ namespace psx_code_types
                     }
                     continue;
                 }
+                if ((operation.kind == OperationKind::CompareNotEqual16 ||
+                     operation.kind == OperationKind::CompareEqual16) &&
+                    i + 1U < operations.size() &&
+                    operations[i + 1U].kind == OperationKind::XploderMegaCode)
+                {
+                    comments.push_back(
+                        std::string("# Xploder Type ") +
+                        (operation.kind == OperationKind::CompareNotEqual16 ? "9" : "7") +
+                        " installation guard: execute the following Type 6 block when [0x" +
+                        hex(0x80000000U | maskedPsxAddress(operation.address), 8) +
+                        (operation.kind == OperationKind::CompareNotEqual16 ? "] != 0x" : "] == 0x") +
+                        wordValue(operation.value));
+                    continue;
+                }
                 if (operation.kind == OperationKind::Write8)
                 {
                     words.push_back({0x80000000U | maskedPsxAddress(operation.address), byteValue(operation.value), 8});
+                    continue;
+                }
+                if (operation.kind == OperationKind::Scratchpad8)
+                {
+                    words.push_back({operation.address, byteValue(operation.value), 8});
+                    continue;
+                }
+                if (operation.kind == OperationKind::Scratchpad16)
+                {
+                    words.push_back({operation.address, wordValue(operation.value), 16});
+                    continue;
+                }
+                if (operation.kind == OperationKind::Scratchpad32)
+                {
+                    words.push_back({operation.address, dwordValue(operation.value), 32});
                     continue;
                 }
                 if (operation.kind == OperationKind::Write32)
@@ -1067,6 +1102,39 @@ namespace psx_code_types
                 if (operation.kind == OperationKind::Write16)
                 {
                     words.push_back({0x80000000U | maskedPsxAddress(operation.address), wordValue(operation.value), 16});
+                    continue;
+                }
+                if (operation.kind == OperationKind::XploderMegaCode)
+                {
+                    if (operation.payload.empty() || (operation.payload.size() % 4U) != 0U)
+                    {
+                        comments.push_back("# Skipped malformed Xploder Type 6 payload while producing MIPS output");
+                        continue;
+                    }
+
+                    comments.push_back(
+                        "# Xploder Type 6 breakpoint address: 0x" +
+                        hex(operation.secondAddress, 8) +
+                        (operation.compareValue.empty()
+                            ? std::string{}
+                            : " | control: 0x" + operation.compareValue));
+                    comments.push_back(
+                        "# Xploder Type 6 executable installed at 0x80000040 (" +
+                        std::to_string(operation.payload.size()) + " bytes)");
+
+                    for (std::size_t offset = 0; offset < operation.payload.size(); offset += 4U)
+                    {
+                        const std::uint32_t word =
+                            static_cast<std::uint32_t>(operation.payload[offset]) |
+                            (static_cast<std::uint32_t>(operation.payload[offset + 1U]) << 8) |
+                            (static_cast<std::uint32_t>(operation.payload[offset + 2U]) << 16) |
+                            (static_cast<std::uint32_t>(operation.payload[offset + 3U]) << 24);
+                        words.push_back({
+                            0x80000000U | maskedPsxAddress(
+                                operation.address + static_cast<std::uint32_t>(offset)),
+                            hex(word, 8),
+                            32});
+                    }
                     continue;
                 }
                 if (operation.kind == OperationKind::XploderMassWrite)

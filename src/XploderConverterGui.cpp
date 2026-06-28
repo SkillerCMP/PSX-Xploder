@@ -16,13 +16,14 @@
 
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <shellapi.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cwctype>
-#include <filesystem>
-#include <fstream>
+#include <shlobj.h>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -30,6 +31,7 @@
 #include <vector>
 
 #include "MultiFormatCodeConverter.hpp"
+#include "LegacyDatabaseImport.hpp"
 
 #if __has_include("resource.h")
 #include "resource.h"
@@ -40,6 +42,7 @@
 #endif
 
 #pragma comment(lib, "Comctl32.lib")
+#pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "Shell32.lib")
 
 namespace
@@ -47,8 +50,8 @@ namespace
     constexpr wchar_t WindowClassName[] = L"XploderPsxConverterGuiWindow";
     constexpr wchar_t SplitterClassName[] = L"XploderPsxConverterSplitter";
     constexpr wchar_t AppTitle[] = L"Xploder PSX Converter";
-    constexpr wchar_t AppVersion[] = L"v1.04";
-    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.04";
+    constexpr wchar_t AppVersion[] = L"v1.05";
+    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.05";
 
     enum ControlId : int
     {
@@ -61,7 +64,10 @@ namespace
         IdGroupCheck,
         IdAnnotateCheck,
         IdCmpOutputCheck,
+        IdXLinkFormatCheck,
         IdDuckStationCombineCheck,
+        IdCaetlaCombineCheck,
+        IdCaetla341Check,
         IdDuckStationCondenseCheck,
         IdSerialRepeaterCondenseCheck,
         IdMipsPackType5Check,
@@ -77,6 +83,9 @@ namespace
 
     enum MenuId : int
     {
+        IdMenuImportXploderRom = 2001,
+        IdMenuImportArGsV1,
+
         IdMenuAutoConvert = 3001,
         IdMenuAnnotateCodeTypes,
         IdMenuCmpDbCompatible,
@@ -87,6 +96,7 @@ namespace
         IdMenuHideClear,
 
         IdMenuGroupEncrypted,
+        IdMenuXLinkFormat,
         IdMenuEncryptionKey4,
         IdMenuEncryptionKey5,
         IdMenuEncryptionKey6,
@@ -95,6 +105,8 @@ namespace
         IdMenuPayloadKey7,
 
         IdMenuDuckStationCombine,
+        IdMenuCaetlaCombine,
+        IdMenuCaetla341,
         IdMenuDuckStationCondense,
         IdMenuSerialRepeaterCondense,
         IdMenuMipsPackType5
@@ -110,7 +122,10 @@ namespace
     HWND g_groupCheck = nullptr;
     HWND g_annotateCheck = nullptr;
     HWND g_cmpOutputCheck = nullptr;
+    HWND g_xLinkFormatCheck = nullptr;
     HWND g_duckStationCombineCheck = nullptr;
+    HWND g_caetlaCombineCheck = nullptr;
+    HWND g_caetla341Check = nullptr;
     HWND g_duckStationCondenseCheck = nullptr;
     HWND g_serialRepeaterCondenseCheck = nullptr;
     HWND g_mipsPackType5Check = nullptr;
@@ -125,6 +140,8 @@ namespace
     HWND g_inputLabel = nullptr;
     HWND g_outputLabel = nullptr;
     HMENU g_menuBar = nullptr;
+    HMENU g_fileMenu = nullptr;
+    HMENU g_importMenu = nullptr;
     HMENU g_optionsMenu = nullptr;
     HMENU g_programOptionsMenu = nullptr;
     HMENU g_hideButtonsMenu = nullptr;
@@ -165,6 +182,9 @@ namespace
     void redrawOpenPopupMenusImmediately();
     LRESULT CALLBACK optionsMenuMessageFilter(int code, WPARAM wParam, LPARAM lParam);
     void savePersistentSettings();
+    bool importLegacyDatabaseFile(const std::wstring& path, legacy_database_import::Kind kind);
+    bool autoDetectDroppedImport(const std::wstring& path);
+    void showLegacyImportDialog(legacy_database_import::Kind kind);
     psx_code_types::Family selectedFamily(HWND combo);
     bool batchDecryptFolder(const std::wstring& folderPath);
     void setBatchUiActive(bool active);
@@ -381,7 +401,7 @@ namespace
         if (fileSize.QuadPart < 0 || fileSize.QuadPart > MaximumDroppedFileSize)
         {
             CloseHandle(file);
-            error = L"The file is larger than the 64 MB text-file limit.";
+            error = L"The file is larger than the 64 MB import limit.";
             return false;
         }
 
@@ -525,6 +545,7 @@ namespace
         EnableWindow(g_annotateCheck, enabled);
         EnableWindow(g_cmpOutputCheck, enabled);
         EnableWindow(g_duckStationCombineCheck, enabled);
+        EnableWindow(g_caetlaCombineCheck, enabled);
         EnableWindow(g_duckStationCondenseCheck, enabled);
         EnableWindow(g_serialRepeaterCondenseCheck, enabled);
         EnableWindow(g_mipsPackType5Check, enabled);
@@ -669,9 +690,14 @@ namespace
         if (copied == 0U || copied >= modulePath.size())
             return L"XploderConverter.ini";
 
-        std::filesystem::path path(std::wstring(modulePath.data(), copied));
-        path.replace_filename(L"XploderConverter.ini");
-        return path.wstring();
+        std::wstring path(modulePath.data(), copied);
+        const std::size_t separator = path.find_last_of(L"\\/");
+        if (separator == std::wstring::npos)
+            return L"XploderConverter.ini";
+
+        path.erase(separator + 1U);
+        path += L"XploderConverter.ini";
+        return path;
     }
 
     int readSettingInt(const wchar_t* key, int defaultValue)
@@ -702,8 +728,11 @@ namespace
         setChecked(g_groupCheck, readSettingInt(L"GroupEncrypted444", 0) != 0);
         setChecked(g_annotateCheck, readSettingInt(L"AnnotateCodeTypes", 0) != 0);
         setChecked(g_cmpOutputCheck, readSettingInt(L"CmpDbCompatible", 1) != 0);
+        setChecked(g_xLinkFormatCheck, readSettingInt(L"XLinkFormat", 0) != 0);
         setChecked(g_autoCheck, readSettingInt(L"AutoConvert", 0) != 0);
         setChecked(g_duckStationCombineCheck, readSettingInt(L"DuckStationCombine80", 0) != 0);
+        setChecked(g_caetlaCombineCheck, readSettingInt(L"CaetlaCombine80", 0) != 0);
+        setChecked(g_caetla341Check, readSettingInt(L"Caetla341Extended", 0) != 0);
         setChecked(g_duckStationCondenseCheck, readSettingInt(L"DuckStationCondenseD0", 0) != 0);
         setChecked(g_serialRepeaterCondenseCheck, readSettingInt(L"CondenseSerialRepeater", 0) != 0);
         setChecked(g_mipsPackType5Check, readSettingInt(L"MipsPackType5", 0) != 0);
@@ -726,8 +755,11 @@ namespace
         writeSettingInt(L"GroupEncrypted444", isChecked(g_groupCheck) ? 1 : 0);
         writeSettingInt(L"AnnotateCodeTypes", isChecked(g_annotateCheck) ? 1 : 0);
         writeSettingInt(L"CmpDbCompatible", isChecked(g_cmpOutputCheck) ? 1 : 0);
+        writeSettingInt(L"XLinkFormat", isChecked(g_xLinkFormatCheck) ? 1 : 0);
         writeSettingInt(L"AutoConvert", isChecked(g_autoCheck) ? 1 : 0);
         writeSettingInt(L"DuckStationCombine80", isChecked(g_duckStationCombineCheck) ? 1 : 0);
+        writeSettingInt(L"CaetlaCombine80", isChecked(g_caetlaCombineCheck) ? 1 : 0);
+        writeSettingInt(L"Caetla341Extended", isChecked(g_caetla341Check) ? 1 : 0);
         writeSettingInt(L"DuckStationCondenseD0", isChecked(g_duckStationCondenseCheck) ? 1 : 0);
         writeSettingInt(L"CondenseSerialRepeater", isChecked(g_serialRepeaterCondenseCheck) ? 1 : 0);
         writeSettingInt(L"MipsPackType5", isChecked(g_mipsPackType5Check) ? 1 : 0);
@@ -770,6 +802,8 @@ namespace
 
         if (outputFamily == psx_code_types::Family::XploderEncrypted)
         {
+            AppendMenuW(g_currentOutputMenu, MF_STRING, IdMenuXLinkFormat, L"X-Link Format");
+            AppendMenuW(g_currentOutputMenu, MF_SEPARATOR, 0U, nullptr);
             AppendMenuW(g_currentOutputMenu, MF_STRING, IdMenuGroupEncrypted, L"Group Encrypted 4-4-4");
             AppendMenuW(g_currentOutputMenu, MF_SEPARATOR, 0U, nullptr);
 
@@ -789,10 +823,13 @@ namespace
 
             g_autoConversionMenu = CreatePopupMenu();
             HMENU conversionMenu = g_autoConversionMenu;
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuSerialRepeaterCondense, L"Condense Writes / GS Type 5 -> Type B Slider");
             AppendMenuW(conversionMenu, MF_STRING, IdMenuMipsPackType5, L"Pack PS1 MIPS -> Type 5");
+            checkMenuItemState(conversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
             checkMenuItemState(conversionMenu, IdMenuMipsPackType5, isChecked(g_mipsPackType5Check));
             AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(conversionMenu), L"Auto CodeType Conversion");
 
+            checkMenuItemState(g_currentOutputMenu, IdMenuXLinkFormat, isChecked(g_xLinkFormatCheck));
             checkMenuItemState(g_currentOutputMenu, IdMenuGroupEncrypted, isChecked(g_groupCheck));
             CheckMenuRadioItem(
                 encryptionKeyMenu,
@@ -807,12 +844,25 @@ namespace
                 comboIndex(g_payloadKeyCombo) == 1 ? IdMenuPayloadKey7 : IdMenuPayloadKey6,
                 MF_BYCOMMAND);
         }
-        else if (outputFamily == psx_code_types::Family::GameSharkActionReplay ||
-                 outputFamily == psx_code_types::Family::Caetla)
+        else if (outputFamily == psx_code_types::Family::GameSharkActionReplay)
         {
             g_autoConversionMenu = CreatePopupMenu();
             HMENU conversionMenu = g_autoConversionMenu;
             AppendMenuW(conversionMenu, MF_STRING, IdMenuSerialRepeaterCondense, L"Condense Writes -> Type 5");
+            checkMenuItemState(conversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
+            AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(conversionMenu), L"Auto CodeType Conversion");
+        }
+        else if (outputFamily == psx_code_types::Family::Caetla)
+        {
+            AppendMenuW(g_currentOutputMenu, MF_STRING, IdMenuCaetla341, L"Caetla .341 Extended Types");
+            AppendMenuW(g_currentOutputMenu, MF_SEPARATOR, 0U, nullptr);
+            checkMenuItemState(g_currentOutputMenu, IdMenuCaetla341, isChecked(g_caetla341Check));
+
+            g_autoConversionMenu = CreatePopupMenu();
+            HMENU conversionMenu = g_autoConversionMenu;
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuCaetlaCombine, L"80 + 80 -> 90");
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuSerialRepeaterCondense, L"Condense Writes / GS Type 5 -> Type B Slider");
+            checkMenuItemState(conversionMenu, IdMenuCaetlaCombine, isChecked(g_caetlaCombineCheck));
             checkMenuItemState(conversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
             AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(conversionMenu), L"Auto CodeType Conversion");
         }
@@ -830,9 +880,15 @@ namespace
         }
         else if (outputFamily == psx_code_types::Family::XploderRaw)
         {
+            AppendMenuW(g_currentOutputMenu, MF_STRING, IdMenuXLinkFormat, L"X-Link Format");
+            AppendMenuW(g_currentOutputMenu, MF_SEPARATOR, 0U, nullptr);
+            checkMenuItemState(g_currentOutputMenu, IdMenuXLinkFormat, isChecked(g_xLinkFormatCheck));
+
             g_autoConversionMenu = CreatePopupMenu();
             HMENU conversionMenu = g_autoConversionMenu;
+            AppendMenuW(conversionMenu, MF_STRING, IdMenuSerialRepeaterCondense, L"Condense Writes / GS Type 5 -> Type B Slider");
             AppendMenuW(conversionMenu, MF_STRING, IdMenuMipsPackType5, L"Pack PS1 MIPS -> Type 5");
+            checkMenuItemState(conversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
             checkMenuItemState(conversionMenu, IdMenuMipsPackType5, isChecked(g_mipsPackType5Check));
             AppendMenuW(g_currentOutputMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(conversionMenu), L"Auto CodeType Conversion");
         }
@@ -871,10 +927,11 @@ namespace
         return id == IdMenuAutoConvert || id == IdMenuAnnotateCodeTypes || id == IdMenuCmpDbCompatible ||
                id == IdMenuHideConvert || id == IdMenuHideCopyOutput ||
                id == IdMenuHideOutputToInput || id == IdMenuHideClear ||
-               id == IdMenuGroupEncrypted ||
+               id == IdMenuGroupEncrypted || id == IdMenuXLinkFormat ||
                (id >= IdMenuEncryptionKey4 && id <= IdMenuEncryptionKey7) ||
                id == IdMenuPayloadKey6 || id == IdMenuPayloadKey7 ||
-               id == IdMenuDuckStationCombine || id == IdMenuDuckStationCondense ||
+               id == IdMenuDuckStationCombine || id == IdMenuCaetlaCombine || id == IdMenuCaetla341 ||
+               id == IdMenuDuckStationCondense ||
                id == IdMenuSerialRepeaterCondense || id == IdMenuMipsPackType5;
     }
 
@@ -890,7 +947,10 @@ namespace
         checkMenuItemState(g_hideButtonsMenu, IdMenuHideClear, g_hideClearButton);
 
         checkMenuItemState(g_currentOutputMenu, IdMenuGroupEncrypted, isChecked(g_groupCheck));
+        checkMenuItemState(g_currentOutputMenu, IdMenuXLinkFormat, isChecked(g_xLinkFormatCheck));
         checkMenuItemState(g_autoConversionMenu, IdMenuDuckStationCombine, isChecked(g_duckStationCombineCheck));
+        checkMenuItemState(g_autoConversionMenu, IdMenuCaetlaCombine, isChecked(g_caetlaCombineCheck));
+        checkMenuItemState(g_currentOutputMenu, IdMenuCaetla341, isChecked(g_caetla341Check));
         checkMenuItemState(g_autoConversionMenu, IdMenuDuckStationCondense, isChecked(g_duckStationCondenseCheck));
         checkMenuItemState(g_autoConversionMenu, IdMenuSerialRepeaterCondense, isChecked(g_serialRepeaterCondenseCheck));
         checkMenuItemState(g_autoConversionMenu, IdMenuMipsPackType5, isChecked(g_mipsPackType5Check));
@@ -947,13 +1007,20 @@ namespace
                 g_hideClearButton = !g_hideClearButton;
             layoutChanged = true;
         }
-        else if (id == IdMenuGroupEncrypted || id == IdMenuDuckStationCombine ||
-                 id == IdMenuDuckStationCondense || id == IdMenuSerialRepeaterCondense ||
+        else if (id == IdMenuGroupEncrypted || id == IdMenuXLinkFormat ||
+                 id == IdMenuDuckStationCombine || id == IdMenuCaetlaCombine || id == IdMenuCaetla341 || id == IdMenuDuckStationCondense ||
+                 id == IdMenuSerialRepeaterCondense ||
                  id == IdMenuMipsPackType5)
         {
             HWND target = g_groupCheck;
-            if (id == IdMenuDuckStationCombine)
+            if (id == IdMenuXLinkFormat)
+                target = g_xLinkFormatCheck;
+            else if (id == IdMenuDuckStationCombine)
                 target = g_duckStationCombineCheck;
+            else if (id == IdMenuCaetlaCombine)
+                target = g_caetlaCombineCheck;
+            else if (id == IdMenuCaetla341)
+                target = g_caetla341Check;
             else if (id == IdMenuDuckStationCondense)
                 target = g_duckStationCondenseCheck;
             else if (id == IdMenuSerialRepeaterCondense)
@@ -1117,6 +1184,8 @@ namespace
     void createOptionsMenu(HWND hwnd)
     {
         g_menuBar = CreateMenu();
+        g_fileMenu = CreatePopupMenu();
+        g_importMenu = CreatePopupMenu();
         g_optionsMenu = CreatePopupMenu();
         g_programOptionsMenu = CreatePopupMenu();
         g_hideButtonsMenu = CreatePopupMenu();
@@ -1131,11 +1200,130 @@ namespace
         AppendMenuW(g_hideButtonsMenu, MF_STRING, IdMenuHideOutputToInput, L"Hide Output -> Input");
         AppendMenuW(g_hideButtonsMenu, MF_STRING, IdMenuHideClear, L"Hide Clear");
 
+        AppendMenuW(g_importMenu, MF_STRING, IdMenuImportXploderRom, L"Xploder ROM");
+        AppendMenuW(g_importMenu, MF_STRING, IdMenuImportArGsV1, L"AR/GS / Datel ROM / Code Database");
+        AppendMenuW(g_fileMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_importMenu), L"Import");
+
         AppendMenuW(g_optionsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_programOptionsMenu), L"Program Options");
         AppendMenuW(g_optionsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_hideButtonsMenu), L"Hide Buttons");
         AppendMenuW(g_optionsMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(g_currentOutputMenu), L"Current Output");
+        AppendMenuW(g_menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_fileMenu), L"File");
         AppendMenuW(g_menuBar, MF_POPUP, reinterpret_cast<UINT_PTR>(g_optionsMenu), L"Options");
         SetMenu(hwnd, g_menuBar);
+    }
+
+    void applyImportedDatabaseResult(
+        const std::wstring& path,
+        const legacy_database_import::Result& result)
+    {
+        g_isLoadingInput = true;
+        setEditText(g_inputEdit, widenUtf8(result.text));
+        g_isLoadingInput = false;
+
+        const int inputSelection =
+            result.kind == legacy_database_import::Kind::XploderRom ? 1 : 0;
+        SendMessageW(g_inputTypeCombo, CB_SETCURSEL, inputSelection, 0);
+        updateModeUi();
+        savePersistentSettings();
+
+        SendMessageW(g_inputEdit, EM_SETSEL, 0, 0);
+        SendMessageW(g_inputEdit, EM_SCROLLCARET, 0, 0);
+        SetFocus(g_inputEdit);
+
+        const std::wstring typeName = result.formatDescription.empty()
+            ? (result.kind == legacy_database_import::Kind::XploderRom
+                ? L"Xploder ROM"
+                : L"Action Replay/GameShark database")
+            : widenUtf8(result.formatDescription);
+        setStatus(
+            L"Imported " + typeName + L": " +
+            std::to_wstring(result.games) + L" game(s), " +
+            std::to_wstring(result.cheats) + L" code(s), " +
+            std::to_wstring(result.codeLines) + L" line(s) from " +
+            fileNameFromPath(path) + L".");
+
+        if (isChecked(g_autoCheck))
+            convertNow();
+    }
+
+    bool importLegacyDatabaseFile(
+        const std::wstring& path,
+        legacy_database_import::Kind kind)
+    {
+        std::vector<std::uint8_t> bytes;
+        std::wstring readError;
+        if (!readDroppedFileBytes(path, bytes, readError))
+        {
+            setStatus(std::wstring(L"Could not import file: ") + readError);
+            MessageBoxW(
+                g_mainWindow,
+                readError.c_str(),
+                L"Import Failed",
+                MB_OK | MB_ICONWARNING);
+            return false;
+        }
+
+        legacy_database_import::Result result;
+        std::string importError;
+        const bool imported =
+            kind == legacy_database_import::Kind::XploderRom
+                ? legacy_database_import::importXploderRom(bytes, result, importError)
+                : legacy_database_import::importActionReplayGameShark(bytes, result, importError);
+        if (!imported)
+        {
+            const std::wstring message = widenUtf8(importError);
+            setStatus(L"Import failed for " + fileNameFromPath(path) + L".");
+            MessageBoxW(
+                g_mainWindow,
+                message.c_str(),
+                L"Import Failed",
+                MB_OK | MB_ICONWARNING);
+            return false;
+        }
+
+        applyImportedDatabaseResult(path, result);
+        return true;
+    }
+
+    bool autoDetectDroppedImport(const std::wstring& path)
+    {
+        std::vector<std::uint8_t> bytes;
+        std::wstring readError;
+        if (!readDroppedFileBytes(path, bytes, readError))
+            return false;
+
+        legacy_database_import::Result result;
+        std::string importError;
+        if (!legacy_database_import::autoDetect(bytes, result, importError))
+            return false;
+
+        applyImportedDatabaseResult(path, result);
+        return true;
+    }
+
+    void showLegacyImportDialog(legacy_database_import::Kind kind)
+    {
+        std::array<wchar_t, 32768> path{};
+        const wchar_t* filter =
+            kind == legacy_database_import::Kind::XploderRom
+                ? L"Xploder ROMs (*.fcd;*.rom)\0*.fcd;*.rom\0All files (*.*)\0*.*\0\0"
+                : L"AR/GS and Datel ROMs (*.bin;*.rom;*.enc)\0*.bin;*.rom;*.enc\0All files (*.*)\0*.*\0\0";
+
+        OPENFILENAMEW dialog{};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = g_mainWindow;
+        dialog.lpstrFilter = filter;
+        dialog.lpstrFile = path.data();
+        dialog.nMaxFile = static_cast<DWORD>(path.size());
+        dialog.lpstrTitle =
+            kind == legacy_database_import::Kind::XploderRom
+                ? L"Import Xploder ROM"
+                : L"Import Action Replay/GameShark or Datel ROM/Database";
+        dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST |
+                       OFN_HIDEREADONLY;
+
+        if (GetOpenFileNameW(&dialog))
+            importLegacyDatabaseFile(path.data(), kind);
     }
 
     bool loadDroppedTextFile(const std::wstring& path)
@@ -1209,7 +1397,7 @@ namespace
 
             if (fileCount != 1U)
             {
-                setStatus(L"Drop one text file or one folder at a time onto the Input pane.");
+                setStatus(L"Drop one supported file or one folder at a time onto the Input pane.");
                 MessageBeep(MB_ICONWARNING);
                 DragFinish(drop);
                 return 0;
@@ -1230,7 +1418,8 @@ namespace
             }
             else
             {
-                loadDroppedTextFile(path);
+                if (!autoDetectDroppedImport(path))
+                    loadDroppedTextFile(path);
             }
             return 0;
         }
@@ -1310,9 +1499,17 @@ namespace
         options.inputFamily = selectedFamily(g_inputTypeCombo);
         options.outputFamily = selectedFamily(g_outputTypeCombo);
         options.combineDuckStation16BitWrites = isChecked(g_duckStationCombineCheck);
+        options.combineCaetla16BitWrites = isChecked(g_caetlaCombineCheck);
+        options.caetla341ExtendedTypes = isChecked(g_caetla341Check);
+        options.caetlaFirmwareAccurateOutput =
+            options.outputFamily == psx_code_types::Family::Caetla;
+        options.caetlaNativeTypeBSliders =
+            options.outputFamily == psx_code_types::Family::Caetla &&
+            isChecked(g_serialRepeaterCondenseCheck);
         options.condenseDuckStationActivators = isChecked(g_duckStationCondenseCheck);
         options.condenseBasicSerialRepeaters = isChecked(g_serialRepeaterCondenseCheck);
         options.packMipsAsXploderType5 = isChecked(g_mipsPackType5Check);
+        options.xLinkFormat = isChecked(g_xLinkFormatCheck);
         options.xploderOptions = selectedOptions();
         return options;
     }
@@ -1330,9 +1527,74 @@ namespace
         return true;
     }
 
-    bool isTextFilePath(const std::filesystem::path& path)
+    bool isPathSeparator(wchar_t character)
     {
-        return equalsIgnoreCase(path.extension().wstring(), L".txt");
+        return character == L'\\' || character == L'/';
+    }
+
+    std::wstring trimTrailingPathSeparators(std::wstring path)
+    {
+        while (path.size() > 1U && isPathSeparator(path.back()))
+        {
+            if (path.size() == 3U && path[1] == L':' && isPathSeparator(path[2]))
+                break;
+            path.pop_back();
+        }
+        return path;
+    }
+
+    std::wstring joinPath(const std::wstring& left, const std::wstring& right)
+    {
+        if (left.empty())
+            return right;
+        if (right.empty())
+            return left;
+
+        std::wstring result = left;
+        if (!isPathSeparator(result.back()))
+            result.push_back(L'\\');
+
+        std::size_t rightStart = 0U;
+        while (rightStart < right.size() && isPathSeparator(right[rightStart]))
+            ++rightStart;
+        result.append(right, rightStart, std::wstring::npos);
+        return result;
+    }
+
+    std::wstring parentDirectoryFromPath(const std::wstring& path)
+    {
+        const std::wstring trimmed = trimTrailingPathSeparators(path);
+        const std::size_t separator = trimmed.find_last_of(L"\\/");
+        if (separator == std::wstring::npos)
+            return {};
+        if (separator == 2U && trimmed.size() >= 3U && trimmed[1] == L':')
+            return trimmed.substr(0U, 3U);
+        return trimmed.substr(0U, separator);
+    }
+
+    bool hasTextFileExtension(const std::wstring& path)
+    {
+        const std::wstring fileName = fileNameFromPath(path);
+        const std::size_t dot = fileName.find_last_of(L'.');
+        return dot != std::wstring::npos && equalsIgnoreCase(fileName.substr(dot), L".txt");
+    }
+
+    bool directoryExists(const std::wstring& path)
+    {
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+               (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U;
+    }
+
+    bool createDirectoriesWin7(const std::wstring& path)
+    {
+        if (path.empty() || directoryExists(path))
+            return true;
+
+        const int result = SHCreateDirectoryExW(nullptr, path.c_str(), nullptr);
+        if (result == ERROR_SUCCESS || result == ERROR_ALREADY_EXISTS || result == ERROR_FILE_EXISTS)
+            return directoryExists(path);
+        return false;
     }
 
     std::string useWindowsLineEndings(const std::string& text)
@@ -1362,25 +1624,100 @@ namespace
     }
 
     bool writeUtf8TextFile(
-        const std::filesystem::path& path,
+        const std::wstring& path,
         const std::string& text,
         std::wstring& error)
     {
         error.clear();
-        std::ofstream file(path, std::ios::binary | std::ios::trunc);
-        if (!file)
+        HANDLE file = CreateFileW(
+            path.c_str(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ,
+            nullptr,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+
+        if (file == INVALID_HANDLE_VALUE)
         {
             error = L"Could not create the output file.";
             return false;
         }
 
         const std::string windowsText = useWindowsLineEndings(text);
-        file.write(windowsText.data(), static_cast<std::streamsize>(windowsText.size()));
-        if (!file)
+        std::size_t totalWritten = 0U;
+        while (totalWritten < windowsText.size())
+        {
+            const std::size_t remaining = windowsText.size() - totalWritten;
+            const DWORD request = static_cast<DWORD>(std::min<std::size_t>(remaining, 1024U * 1024U));
+            DWORD amountWritten = 0U;
+            if (!WriteFile(file, windowsText.data() + totalWritten, request, &amountWritten, nullptr) ||
+                amountWritten == 0U)
+            {
+                CloseHandle(file);
+                error = L"Could not finish writing the output file.";
+                return false;
+            }
+            totalWritten += amountWritten;
+        }
+
+        if (!CloseHandle(file))
         {
             error = L"Could not finish writing the output file.";
             return false;
         }
+        return true;
+    }
+
+    struct BatchInputFile
+    {
+        std::wstring fullPath;
+        std::wstring relativePath;
+    };
+
+    bool collectTextFilesRecursive(
+        const std::wstring& currentFolder,
+        const std::wstring& relativeFolder,
+        std::vector<BatchInputFile>& files,
+        bool& rootScanFailed)
+    {
+        const std::wstring searchPattern = joinPath(currentFolder, L"*");
+        WIN32_FIND_DATAW findData{};
+        HANDLE findHandle = FindFirstFileW(searchPattern.c_str(), &findData);
+        if (findHandle == INVALID_HANDLE_VALUE)
+        {
+            if (relativeFolder.empty())
+                rootScanFailed = true;
+            return false;
+        }
+
+        do
+        {
+            const std::wstring name(findData.cFileName);
+            if (name == L"." || name == L"..")
+                continue;
+
+            const std::wstring fullPath = joinPath(currentFolder, name);
+            const std::wstring relativePath = joinPath(relativeFolder, name);
+            const bool isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U;
+
+            if (isDirectory)
+            {
+                if (equalsIgnoreCase(name, L"Decrypted") ||
+                    (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U)
+                {
+                    continue;
+                }
+                collectTextFilesRecursive(fullPath, relativePath, files, rootScanFailed);
+            }
+            else if (hasTextFileExtension(name))
+            {
+                files.push_back({fullPath, relativePath});
+            }
+        }
+        while (FindNextFileW(findHandle, &findData));
+
+        FindClose(findHandle);
         return true;
     }
 
@@ -1415,8 +1752,6 @@ namespace
 
     bool batchDecryptFolder(const std::wstring& folderPath)
     {
-        namespace fs = std::filesystem;
-
         if (g_isBatchDecrypting)
             return false;
 
@@ -1424,47 +1759,25 @@ namespace
         setStatus(L"Scanning dropped folder for .txt files...");
         refreshBatchProgressDisplay();
 
-        const fs::path sourceRoot(folderPath);
-        const fs::path outputRoot = sourceRoot / L"Decrypted";
-        std::vector<fs::path> inputFiles;
-        std::error_code errorCode;
+        const std::wstring sourceRoot = trimTrailingPathSeparators(folderPath);
+        const std::wstring outputRoot = joinPath(sourceRoot, L"Decrypted");
+        std::vector<BatchInputFile> inputFiles;
+        bool rootScanFailed = false;
+        collectTextFilesRecursive(sourceRoot, L"", inputFiles, rootScanFailed);
 
-        fs::recursive_directory_iterator iterator(
-            sourceRoot,
-            fs::directory_options::skip_permission_denied,
-            errorCode);
-        const fs::recursive_directory_iterator end;
-
-        if (errorCode)
+        if (rootScanFailed)
         {
             setStatus(L"Could not scan the dropped folder.");
             MessageBeep(MB_ICONWARNING);
             return false;
         }
 
-        while (iterator != end)
-        {
-            const fs::directory_entry entry = *iterator;
-            std::error_code entryError;
-
-            if (entry.is_directory(entryError))
+        std::sort(inputFiles.begin(), inputFiles.end(),
+            [](const BatchInputFile& left, const BatchInputFile& right)
             {
-                // Never process a previous batch's output as new input.
-                if (equalsIgnoreCase(entry.path().filename().wstring(), L"Decrypted"))
-                    iterator.disable_recursion_pending();
-            }
-            else if (!entryError && entry.is_regular_file(entryError) &&
-                     !entryError && isTextFilePath(entry.path()))
-            {
-                inputFiles.push_back(entry.path());
-            }
+                return left.relativePath < right.relativePath;
+            });
 
-            iterator.increment(errorCode);
-            if (errorCode)
-                errorCode.clear();
-        }
-
-        std::sort(inputFiles.begin(), inputFiles.end());
         if (inputFiles.empty())
         {
             setStatus(L"The dropped folder does not contain any .txt files.");
@@ -1472,8 +1785,7 @@ namespace
             return false;
         }
 
-        fs::create_directories(outputRoot, errorCode);
-        if (errorCode)
+        if (!createDirectoriesWin7(outputRoot))
         {
             setStatus(L"Could not create the Decrypted output folder.");
             MessageBeep(MB_ICONWARNING);
@@ -1499,16 +1811,17 @@ namespace
 
         for (std::size_t fileIndex = 0; fileIndex < inputFiles.size(); ++fileIndex)
         {
-            const fs::path& inputPath = inputFiles[fileIndex];
-            updateBatchProgress(fileIndex, inputFiles.size(), inputPath.filename().wstring());
+            const BatchInputFile& inputFile = inputFiles[fileIndex];
+            const std::wstring inputFileName = fileNameFromPath(inputFile.fullPath);
+            updateBatchProgress(fileIndex, inputFiles.size(), inputFileName);
 
             std::vector<std::uint8_t> bytes;
             std::wstring fileError;
-            if (!readDroppedFileBytes(inputPath.wstring(), bytes, fileError))
+            if (!readDroppedFileBytes(inputFile.fullPath, bytes, fileError))
             {
                 ++failedCount;
                 if (firstFailure.empty())
-                    firstFailure = inputPath.filename().wstring() + L": " + fileError;
+                    firstFailure = inputFileName + L": " + fileError;
                 updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
                 continue;
             }
@@ -1520,7 +1833,7 @@ namespace
             {
                 ++failedCount;
                 if (firstFailure.empty())
-                    firstFailure = inputPath.filename().wstring() + L": binary data detected.";
+                    firstFailure = inputFileName + L": binary data detected.";
                 updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
                 continue;
             }
@@ -1534,29 +1847,24 @@ namespace
                 const std::string decrypted =
                     xploder_converter::convertText(normalized, options);
 
-                fs::path relativePath = inputPath.lexically_relative(sourceRoot);
-                if (relativePath.empty() || relativePath.native().find(L"..") == 0U)
-                    relativePath = inputPath.filename();
-
-                const fs::path outputPath = outputRoot / relativePath;
-                fs::create_directories(outputPath.parent_path(), errorCode);
-                if (errorCode)
+                const std::wstring outputPath = joinPath(outputRoot, inputFile.relativePath);
+                const std::wstring outputFolder = parentDirectoryFromPath(outputPath);
+                if (!outputFolder.empty() && !createDirectoriesWin7(outputFolder))
                 {
                     ++failedCount;
                     if (firstFailure.empty())
-                        firstFailure = outputPath.filename().wstring() + L": could not create its output folder.";
-                    errorCode.clear();
+                        firstFailure = fileNameFromPath(outputPath) + L": could not create its output folder.";
                     updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
-                continue;
+                    continue;
                 }
 
                 if (!writeUtf8TextFile(outputPath, decrypted, fileError))
                 {
                     ++failedCount;
                     if (firstFailure.empty())
-                        firstFailure = outputPath.filename().wstring() + L": " + fileError;
+                        firstFailure = fileNameFromPath(outputPath) + L": " + fileError;
                     updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
-                continue;
+                    continue;
                 }
 
                 ++convertedCount;
@@ -1565,13 +1873,13 @@ namespace
             {
                 ++failedCount;
                 if (firstFailure.empty())
-                    firstFailure = inputPath.filename().wstring() + L": " + widenUtf8(ex.what());
+                    firstFailure = inputFileName + L": " + widenUtf8(ex.what());
             }
             catch (...)
             {
                 ++failedCount;
                 if (firstFailure.empty())
-                    firstFailure = inputPath.filename().wstring() + L": unknown conversion error.";
+                    firstFailure = inputFileName + L": unknown conversion error.";
             }
 
             updateBatchProgress(fileIndex + 1U, inputFiles.size(), L"");
@@ -1579,7 +1887,7 @@ namespace
 
         std::wstring summary =
             L"Batch decrypted " + std::to_wstring(convertedCount) +
-            L" text file(s) into:\n" + outputRoot.wstring();
+            L" text file(s) into:\n" + outputRoot;
         if (failedCount != 0U)
         {
             summary += L"\n\nFailed: " + std::to_wstring(failedCount);
@@ -1611,6 +1919,7 @@ namespace
         ShowWindow(g_cmpOutputCheck, SW_HIDE);
         ShowWindow(g_autoCheck, SW_HIDE);
         ShowWindow(g_duckStationCombineCheck, SW_HIDE);
+        ShowWindow(g_caetlaCombineCheck, SW_HIDE);
         ShowWindow(g_duckStationCondenseCheck, SW_HIDE);
         ShowWindow(g_serialRepeaterCondenseCheck, SW_HIDE);
         ShowWindow(g_mipsPackType5Check, SW_HIDE);
@@ -2014,6 +2323,26 @@ namespace
         SendMessageW(g_duckStationCombineCheck, BM_SETCHECK, BST_UNCHECKED, 0);
         ShowWindow(g_duckStationCombineCheck, SW_HIDE);
 
+        g_caetlaCombineCheck = createControl(
+            L"BUTTON",
+            L"Combine 80 + 80 -> 90 for Caetla",
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            0,
+            IdCaetlaCombineCheck,
+            hwnd);
+        SendMessageW(g_caetlaCombineCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+        ShowWindow(g_caetlaCombineCheck, SW_HIDE);
+
+        g_caetla341Check = createControl(
+            L"BUTTON",
+            L"Caetla .341 Extended Types",
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            0,
+            IdCaetla341Check,
+            hwnd);
+        SendMessageW(g_caetla341Check, BM_SETCHECK, BST_UNCHECKED, 0);
+        ShowWindow(g_caetla341Check, SW_HIDE);
+
         g_duckStationCondenseCheck = createControl(
             L"BUTTON",
             L"Condense D0 -> C0 Block",
@@ -2026,7 +2355,7 @@ namespace
 
         g_serialRepeaterCondenseCheck = createControl(
             L"BUTTON",
-            L"Condense Writes -> Type 5",
+            L"Condense Writes -> Native Slider",
             BS_AUTOCHECKBOX | WS_TABSTOP,
             0,
             IdSerialRepeaterCondenseCheck,
@@ -2065,9 +2394,20 @@ namespace
         g_annotateCheck = createControl(L"BUTTON", L"Annotate code types", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdAnnotateCheck, hwnd);
         g_cmpOutputCheck = createControl(L"BUTTON", L"Output CMP DB Compatible", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdCmpOutputCheck, hwnd);
         SendMessageW(g_cmpOutputCheck, BM_SETCHECK, BST_CHECKED, 0);
+
+        g_xLinkFormatCheck = createControl(
+            L"BUTTON",
+            L"X-Link Format",
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            0,
+            IdXLinkFormatCheck,
+            hwnd);
+        SendMessageW(g_xLinkFormatCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+        ShowWindow(g_xLinkFormatCheck, SW_HIDE);
+
         g_autoCheck = createControl(L"BUTTON", L"Auto Convert", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IdAutoCheck, hwnd);
 
-        g_inputLabel = createControl(L"STATIC", L"Input (file/folder drop; type selectors are editor-only)", 0, 0, 0, hwnd);
+        g_inputLabel = createControl(L"STATIC", L"Input (drop text, cartridge ROM/database, or a folder)", 0, 0, 0, hwnd);
         g_outputLabel = createControl(L"STATIC", L"Output", 0, 0, 0, hwnd);
         g_splitter = createControl(SplitterClassName, L"", 0, 0, IdSplitter, hwnd);
 
@@ -2119,6 +2459,17 @@ namespace
                 if (handleOptionsMenuCommand(id, false))
                     return 0;
 
+                if (id == IdMenuImportXploderRom)
+                {
+                    showLegacyImportDialog(legacy_database_import::Kind::XploderRom);
+                    return 0;
+                }
+                if (id == IdMenuImportArGsV1)
+                {
+                    showLegacyImportDialog(legacy_database_import::Kind::ActionReplayGameSharkV1);
+                    return 0;
+                }
+
                 if (id == IdConvertButton && notify == BN_CLICKED)
                 {
                     convertNow();
@@ -2148,7 +2499,8 @@ namespace
                     return 0;
                 }
                 if ((id == IdGroupCheck || id == IdAnnotateCheck || id == IdCmpOutputCheck ||
-                     id == IdDuckStationCombineCheck || id == IdDuckStationCondenseCheck ||
+                     id == IdXLinkFormatCheck || id == IdDuckStationCombineCheck || id == IdCaetlaCombineCheck || id == IdCaetla341Check ||
+                     id == IdDuckStationCondenseCheck ||
                      id == IdSerialRepeaterCondenseCheck) && notify == BN_CLICKED)
                 {
                     updateOptionsMenu();

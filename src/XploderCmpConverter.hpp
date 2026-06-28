@@ -1027,6 +1027,62 @@ namespace xploder_converter
         return true;
     }
 
+    // X-Link presentation used by Xploder output. X-Link keeps code names
+    // unprefixed, removes one matching pair of surrounding double quotes, and
+    // prefixes every hexadecimal code row with '$'. This is a presentation-only
+    // pass and does not alter the code bytes or conversion semantics.
+    inline std::string applyOutputXLinkFormatting(const std::string& input)
+    {
+        const std::vector<std::string> lines = splitLines(input);
+        std::vector<std::string> output;
+        output.reserve(lines.size());
+
+        for (const std::string& original : lines)
+        {
+            const std::string text = trim(original);
+            if (text.empty())
+            {
+                output.push_back({});
+                continue;
+            }
+
+            std::string normalizedCode;
+            if (tryNormalizeBatchCodeLine(text, normalizedCode))
+            {
+                // tryNormalizeBatchCodeLine already guarantees exactly one '$'
+                // and preserves any trailing annotation/comment text.
+                output.push_back(std::move(normalizedCode));
+                continue;
+            }
+
+            // Structural directives, comments, credits, and section metadata
+            // are not code names and must remain unchanged.
+            if (isOutputMetadataOrCommentLine(text))
+            {
+                output.push_back(text);
+                continue;
+            }
+
+            std::string name = text;
+            if (!name.empty() && name.front() == '+')
+                name = trim(std::string_view(name).substr(1));
+
+            if (name.size() >= 2U && name.front() == '"' && name.back() == '"')
+                name = std::string(std::string_view(name).substr(1U, name.size() - 2U));
+
+            output.push_back(std::move(name));
+        }
+
+        std::ostringstream joined;
+        for (std::size_t i = 0; i < output.size(); ++i)
+        {
+            if (i != 0)
+                joined << '\n';
+            joined << output[i];
+        }
+        return joined.str();
+    }
+
     // Final output-style pass shared by direct Xploder conversion, all editor
     // code-family emitters, and folder batch output. Semantic conversion is
     // complete before this runs; this function changes only CMP DB presentation.
@@ -1176,67 +1232,61 @@ namespace xploder_converter
         const xploder_psx::Code& rawRow,
         bool encryptedOutput = false)
     {
+        xploder_psx::MassWriteRowContext context;
+        if (!xploder_psx::tryGetMassWriteRowContext(info, rowIndex, context))
+            return "// invalid Type 6 row context";
+
         std::ostringstream ss;
         ss << "// ";
         if (encryptedOutput)
             ss << "encrypted row; RAW meaning: ";
 
-        if (rowIndex == 0)
+        switch (context.role)
         {
-            ss << "Type 6 breakpoint descriptor"
-               << " | breakAddress=0x" << hex8(readBigEndian32(rawRow))
-               << " breakType=0x" << hex4(readBigEndian16(rawRow, 4U));
-            return ss.str();
+            case xploder_psx::MassWriteRowRole::Type6BreakpointDescriptor:
+                ss << "Type 6 breakpoint descriptor"
+                   << " | breakAddress=0x" << hex8(readBigEndian32(rawRow))
+                   << " breakType=0x" << hex4(readBigEndian16(rawRow, 4U));
+                return ss.str();
+
+            case xploder_psx::MassWriteRowRole::Type6MaskAndInlinePayload:
+                ss << "Type 6 breakpoint mask=0x"
+                   << hex8(readBigEndian32(rawRow));
+                if (context.payloadBytesUsed > 0)
+                {
+                    ss << " | payload bytes "
+                       << hex4(context.payloadByteOffset) << '-'
+                       << hex4(context.payloadByteOffset + context.payloadBytesUsed - 1);
+                }
+                break;
+
+            case xploder_psx::MassWriteRowRole::Type6Payload:
+                if (context.payloadBytesUsed > 0)
+                {
+                    ss << "Type 6 payload bytes "
+                       << hex4(context.payloadByteOffset) << '-'
+                       << hex4(context.payloadByteOffset + context.payloadBytesUsed - 1);
+                }
+                else
+                {
+                    ss << "Type 6 padding row";
+                }
+                break;
+
+            case xploder_psx::MassWriteRowRole::Type5Payload:
+                ss << "structured payload row";
+                break;
         }
 
-        const int sourceStart =
-            rowIndex * static_cast<int>(xploder_psx::CodeLength);
-        const int sourceBytesUsed = std::min(
-            static_cast<int>(xploder_psx::CodeLength),
-            std::max(0, info.sourcePayloadSize - sourceStart));
-        const int paddingBytes =
-            static_cast<int>(xploder_psx::CodeLength) - sourceBytesUsed;
+        if (context.paddingBytes > 0)
+            ss << " | paddingBytes=" << context.paddingBytes;
 
-        int payloadStartForRow = -1;
-        int payloadBytesForRow = 0;
-
-        if (rowIndex == 1)
-        {
-            ss << "Type 6 breakpoint mask=0x"
-               << hex8(readBigEndian32(rawRow));
-
-            payloadStartForRow = 0;
-            payloadBytesForRow = std::min(2, info.payloadByteCount);
-            if (payloadBytesForRow > 0)
-            {
-                ss << " | payload bytes 0000-"
-                   << hex4(payloadBytesForRow - 1);
-            }
-        }
-        else
-        {
-            payloadStartForRow = sourceStart - 0x0A;
-            payloadBytesForRow = std::min(
-                static_cast<int>(xploder_psx::CodeLength),
-                std::max(0, info.payloadByteCount - payloadStartForRow));
-
-            if (payloadBytesForRow > 0)
-            {
-                ss << "Type 6 payload bytes "
-                   << hex4(payloadStartForRow) << '-'
-                   << hex4(payloadStartForRow + payloadBytesForRow - 1);
-            }
-            else
-            {
-                ss << "Type 6 padding row";
-            }
-        }
-
-        if (paddingBytes > 0)
-            ss << " | paddingBytes=" << paddingBytes;
-
+        // This is annotation only. The row has already been claimed by the
+        // Type 6 block length and is never sent back through top-level type
+        // dispatch, even when its leading nibble resembles a normal code.
         const int leadingNibble = rawRow[0] >> 4;
-        if (leadingNibble == 9 && payloadBytesForRow == static_cast<int>(xploder_psx::CodeLength))
+        if (leadingNibble == 9 &&
+            context.payloadBytesUsed == static_cast<int>(xploder_psx::CodeLength))
         {
             const std::uint32_t codeWord = readBigEndian32(rawRow);
             const std::uint32_t compareAddress = codeWord & 0x0FFFFFFFU;
@@ -1251,6 +1301,27 @@ namespace xploder_converter
                << leadingNibble
                << " is structured Type 6 data, not a standalone code type";
         }
+        return ss.str();
+    }
+
+    inline std::string buildType5SourceRowComment(
+        const xploder_psx::MassWriteInfo& info,
+        int rowIndex,
+        std::string_view prefix)
+    {
+        xploder_psx::MassWriteRowContext context;
+        if (!xploder_psx::tryGetMassWriteRowContext(info, rowIndex, context) ||
+            context.role != xploder_psx::MassWriteRowRole::Type5Payload)
+        {
+            return "// invalid Type 5 row context";
+        }
+
+        std::ostringstream ss;
+        ss << "// " << prefix << "Type 5 payload bytes "
+           << hex4(context.payloadByteOffset) << '-'
+           << hex4(context.payloadByteOffset + context.payloadBytesUsed - 1);
+        if (context.paddingBytes > 0)
+            ss << " | paddingBytes=" << context.paddingBytes;
         return ss.str();
     }
 
@@ -1599,8 +1670,7 @@ namespace xploder_converter
             if (info.isType6)
             {
                 out << "\t// already-RAW Type 6 header"
-                    << " | continuationBytes=0x" << hex4(info.payloadSize)
-                    << " payloadBytes=0x" << hex4(info.payloadByteCount)
+                    << " | payloadBytes=0x" << hex4(info.payloadByteCount)
                     << " descriptorBytes=0x000A"
                     << " sourceRows=" << info.payloadLineCount;
             }
@@ -1627,14 +1697,8 @@ namespace xploder_converter
                 }
                 else
                 {
-                    const int firstByteOffset =
-                        i * static_cast<int>(xploder_psx::CodeLength);
-                    const int bytesUsed = std::min(
-                        static_cast<int>(xploder_psx::CodeLength),
-                        std::max(0, info.sourcePayloadSize - firstByteOffset));
-                    out << "\t// preserved Type 5 payload bytes "
-                        << hex4(firstByteOffset) << '-'
-                        << hex4(firstByteOffset + bytesUsed - 1);
+                    out << "\t" << buildType5SourceRowComment(
+                        info, i, "preserved ");
                 }
             }
         }
@@ -1703,7 +1767,6 @@ namespace xploder_converter
             {
                 out << "\t// Type 6 external RAW header"
                     << " | payloadKey=" << info.payloadKey
-                    << " continuationBytes=0x" << hex4(info.payloadSize)
                     << " payloadBytes=0x" << hex4(info.payloadByteCount)
                     << " descriptorBytes=0x000A"
                     << " sourceRows=" << info.payloadLineCount;
@@ -1722,6 +1785,10 @@ namespace xploder_converter
             xploder_psx::Code payload =
                 rows[static_cast<std::size_t>(i)];
 
+            xploder_psx::MassWriteRowContext context;
+            if (!xploder_psx::tryGetMassWriteRowContext(info, i, context))
+                return false;
+
             if (isConfirmedMassWritePayloadKey(info.payloadKey))
             {
                 if (!xploder_psx::decryptPayloadChunk(
@@ -1737,7 +1804,23 @@ namespace xploder_converter
             {
                 return false;
             }
-            // Type 6 routes other than 6/7 are copy routes.
+            else if (context.role ==
+                     xploder_psx::MassWriteRowRole::Type6BreakpointDescriptor)
+            {
+                // Keyless Type 6 blocks may still store the breakpoint
+                // descriptor as one ordinary encrypted Xploder line.
+                // Already-RAW descriptors use the copy route and remain intact.
+                (void)xploder_psx::decryptCode(payload);
+            }
+            else if (context.role ==
+                     xploder_psx::MassWriteRowRole::Type6Payload)
+            {
+                // A zero-high-nibble row with the state bit set is an escaped
+                // literal 0x08 payload byte, not a standalone code type.
+                (void)xploder_psx::decryptType6EscapedPayloadRow(payload);
+            }
+            // The mask/inline row and all other keyless Type 6 payload rows
+            // are copied exactly as stored.
 
             out << "\n$" << xploder_psx::toRawCmpText(payload);
             if (options.annotateCodeTypes)
@@ -1749,14 +1832,8 @@ namespace xploder_converter
                 }
                 else
                 {
-                    const int firstByteOffset =
-                        i * static_cast<int>(xploder_psx::CodeLength);
-                    const int bytesUsed = std::min(
-                        static_cast<int>(xploder_psx::CodeLength),
-                        std::max(0, info.sourcePayloadSize - firstByteOffset));
-                    out << "\t// Type 5 payload bytes "
-                        << hex4(firstByteOffset) << '-'
-                        << hex4(firstByteOffset + bytesUsed - 1);
+                    out << "\t" << buildType5SourceRowComment(
+                        info, i, "");
                 }
             }
         }
@@ -1794,7 +1871,6 @@ namespace xploder_converter
         if (!xploder_psx::tryGetMassWriteInfoFromPublicHeader(rawHeader, rawInfo))
             return false;
 
-        const int baseSize = rawInfo.payloadSize;
         const int sourcePayloadSize = rawInfo.sourcePayloadSize;
         const int payloadLineCount = rawInfo.payloadLineCount;
 
@@ -1849,7 +1925,6 @@ namespace xploder_converter
             {
                 out << "\t// Type 6 encrypted header"
                     << " | payloadKey=" << effectivePayloadKey
-                    << " continuationBytes=0x" << hex4(baseSize)
                     << " payloadBytes=0x" << hex4(rawInfo.payloadByteCount)
                     << " descriptorBytes=0x000A"
                     << " sourceRows=" << payloadLineCount;
@@ -1869,6 +1944,13 @@ namespace xploder_converter
                 rows[static_cast<std::size_t>(i)];
             xploder_psx::Code payload = rawPayload;
 
+            xploder_psx::MassWriteRowContext context;
+            if (!xploder_psx::tryGetMassWriteRowContext(
+                    rawInfo, i, context))
+            {
+                return false;
+            }
+
             if (isConfirmedMassWritePayloadKey(effectivePayloadKey))
             {
                 if (!isType6)
@@ -1884,7 +1966,31 @@ namespace xploder_converter
             {
                 return false;
             }
-            // Type 6 routes other than 6/7 are copied unchanged.
+            else if (context.role ==
+                     xploder_psx::MassWriteRowRole::Type6BreakpointDescriptor)
+            {
+                // Canonical virtual breakpoint addresses (80xxxxxx) are stored
+                // as ordinary encrypted lines in known keyless Type 6 blocks.
+                // Physical/keyless 00xxxxxx descriptors remain literal.
+                if ((payload[0] & 0xF0U) == 0x80U &&
+                    !xploder_psx::encryptCode(
+                        payload, options.encryptionKey))
+                {
+                    return false;
+                }
+            }
+            else if (context.role ==
+                     xploder_psx::MassWriteRowRole::Type6Payload &&
+                     payload[0] == 0x08U)
+            {
+                if (!xploder_psx::encryptType6EscapedPayloadRow(
+                        payload, options.encryptionKey))
+                {
+                    return false;
+                }
+            }
+            // The mask/inline row and all other keyless Type 6 payload rows
+            // are copied unchanged.
 
             out << "\n$" << formatEncrypted(
                 payload, options.groupEncryptedOutput);
@@ -1897,14 +2003,8 @@ namespace xploder_converter
                 }
                 else
                 {
-                    const int firstByteOffset =
-                        i * static_cast<int>(xploder_psx::CodeLength);
-                    const int bytesUsed = std::min(
-                        static_cast<int>(xploder_psx::CodeLength),
-                        std::max(0, sourcePayloadSize - firstByteOffset));
-                    out << "\t// encrypted Type 5 payload bytes "
-                        << hex4(firstByteOffset) << '-'
-                        << hex4(firstByteOffset + bytesUsed - 1);
+                    out << "\t" << buildType5SourceRowComment(
+                        rawInfo, i, "encrypted ");
                 }
             }
         }
