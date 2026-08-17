@@ -34,7 +34,7 @@ jobs:
       - name: Upload Windows 7-compatible executables
         uses: actions/upload-artifact@v6
         with:
-          name: PSX-Xploder-v1.05-Windows
+          name: PSX-Xploder-v1.06-Windows
           path: |
             XploderConverterGui-Win32.exe
             XploderConverterGui-Win64.exe

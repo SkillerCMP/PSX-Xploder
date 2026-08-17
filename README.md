@@ -12,7 +12,7 @@ Xploder PSX Converter README
 ![Language](https://img.shields.io/badge/language-C%2B%2B17-blue)
 ![Build](https://img.shields.io/badge/build-MSVC-green)
 ![License](https://img.shields.io/badge/license-GPLv3-red)
-![Version](https://img.shields.io/badge/version-v1.05-brightgreen)
+![Version](https://img.shields.io/badge/version-v1.06-brightgreen)
 
 <a href="https://github.com/SkillerCMP/PSX-Xploder/releases">
   <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/SkillerCMP/PSX-Xploder/total?style=social">
@@ -43,6 +43,29 @@ The project includes Xploder encryption/decryption, structured Type 5 and Type 6
 ---
 
 <details open>
+<summary><strong>🔴 v1.06 — Xplorer/Xploder Firmware Research Cleanup</strong></summary>
+
+<br>
+
+Version 1.06 builds on v1.05 with additional Xplorer/Xploder behavior verified from the `xpcrypt` research branch and recovered firmware/database behavior.
+
+- Type `A` is recognized as a staging-only inline-data block that is converted into a Type `5` Supercode-style payload rather than interpreted as ordinary standalone code rows.
+- Type `B` slide handling retains the confirmed 8-bit repeat-count model and inert Type `1` carrier behavior.
+- Zero-length Type `5` and Type `6` payloads are treated as unsafe device-specific structures instead of harmless empty blocks, matching the firmware loop behavior.
+- Type `E` is recognized as the firmware's 8-bit write to `address + 1`.
+- Type `D` is documented and preserved as a staging-only single-anchor row that can be promoted to Type `F`.
+- Type `F` is treated as a global list anchor rather than a normal one-line conditional.
+- Type `C`, Type `1`, Type `2`, and Type `4` handling/documentation now reflects their device-specific or firmware-specific behavior more accurately.
+- Xplorer/Xploder ROM database import now expands embedded name-abbreviation bytes `01`-`07` inside both game names and `+Code Name` entries.
+- Added focused regression coverage for the new Xplorer/Xploder research behavior.
+
+See [`XPLORER_RESEARCH_CLEANUP.md`](XPLORER_RESEARCH_CLEANUP.md) for the source-derived notes and conversion policy.
+
+</details>
+
+---
+
+<details open>
 <summary><strong>🦈 v1.05 — GameShark Pro 3.1, Datel ROM Import, and DuckStation Source Update</strong></summary>
 
 <br>
@@ -67,6 +90,9 @@ Version 1.05 validates the classic GameShark / Action Replay parser against the 
 - DuckStation `D5/D6`, `A4`, and `C3-C6` are recognized as bounded block conditions rather than GameShark menu controls or ordinary one-row comparisons.
 - `Type = Assembly`, `Activation = Manual/EndFrame`, `Option`, `OptionRange`, `DisallowForAchievements`, and `Ignore` metadata are preserved during DuckStation round trips.
 - Complex DuckStation-only structures such as `51`, `52`, `D7`, `F0-F6`, and Assembly bodies are preserved verbatim when no exact cross-device translation exists.
+
+See [`GAMESHARK_PRO_3.1_CODE_TYPES.md`](GAMESHARK_PRO_3.1_CODE_TYPES.md) for the verified mapping and conversion policy.
+See [`DUCKSTATION_CODE_TYPES.md`](DUCKSTATION_CODE_TYPES.md) for the source-derived DuckStation mapping and preservation policy.
 
 </details>
 
@@ -93,6 +119,7 @@ Version 1.05 validates the classic GameShark / Action Replay parser against the 
 - Reverse expansion of DuckStation `C0` blocks to GameShark `D0` or Xploder Type `7`.
 - CMP-compatible names, credits, and `$` code-line formatting.
 - Legacy database import from encrypted/decrypted Xploder ROMs, full Action Replay/GameShark ROMs, Datel v2.x/v3.x encrypted firmware images, and standalone AR/GS code-database files.
+- Xplorer/Xploder ROM name-abbreviation bytes `01`-`07` are expanded during database import.
 - Automatic content- and structure-based import detection regardless of whether a Datel image is named `.ENC`, `.BIN`, `.ROM`, `.DAT`, or has no extension.
 - Folder drag-and-drop batch cleanup and Xploder decryption.
 - UTF-8, UTF-16, ANSI, LF, CRLF, and browser/chat line-ending support.
@@ -533,7 +560,7 @@ C308C6B8 0001
 91000022 000003E8
 ```
 
-is preserved as one Caetla indirect-write operation and round-trips without the `91` row being mistaken for an ordinary Type `9` write. C3 pair recognition also remains active after a persistent GameShark-mode selector. The verified binary uses selector `0003` for 32-bit C3 writes; `0002` is not emitted as a valid width. Zero-count C2 blocks are preserved when encountered but are not generated. 
+is preserved as one Caetla indirect-write operation and round-trips without the `91` row being mistaken for an ordinary Type `9` write. C3 pair recognition also remains active after a persistent GameShark-mode selector. The verified binary uses selector `0003` for 32-bit C3 writes; `0002` is not emitted as a valid width. Zero-count C2 blocks are preserved when encountered but are not generated. See `CAETLA_0.341_CODE_TYPES.md` for the complete mapping and compatibility notes.
 
 ### DuckStation: condense equal activators
 
@@ -787,6 +814,21 @@ File
 
 For an encrypted Datel image, the importer first checks the original bytes, then tries the appropriate v2.x/v3.x in-memory decryption paths. A decrypted result is accepted only when its database records, names, counts, byte order, and boundaries validate successfully. A v3 content marker is used only to choose the first decryption attempt; it is never treated as sufficient proof by itself.
 
+Supported layouts include:
+
+```text
+Aligned v1-style database
+  - Action Replay v1.99 ROM database
+  - USACODES.BIN / UKCODES.BIN
+  - Ar33.bin-style standalone lists
+  - 8-byte little-endian stored records
+
+Compact v2-style database
+  - Action Replay v2.1 ROM database
+  - Action Replay v2.6 ROM database
+  - 6-byte big-endian stored records
+```
+
 The importer extracts game names, code names, master/auto-activation entries where present, and stored code rows, then switches the Input Type to **GameShark / Action Replay**. Control-only legacy names are accepted safely instead of causing the complete database to be rejected.
 
 Imported text uses the converter's normal structured format:
@@ -798,6 +840,13 @@ $80012345 0063
 ```
 
 The Input pane auto-detects supported binary formats during drag-and-drop. Extensions are only conveniences in the file-selection dialog; they do not control recognition. For example, the same Datel image can be imported as any of these names:
+
+```text
+psxgs_p.enc
+gspro32_rom.bin
+firmware.dat
+unknown_file
+```
 
 Detection validates the decrypted database structure, including record counts, names, alignment, line lengths, byte order, boundaries, and the padding area following the database. If the file is not a recognized binary database, normal text-file loading is attempted instead. The status line reports whether Datel v2.x/v3.x decryption was used, the detected layout, number of games, code entries, code rows, and source filename.
 
@@ -1073,7 +1122,7 @@ src/XploderCodeTypes.hpp
 src/DuckStationCodeTypes.hpp
 src/CaetlaCodeTypes.hpp
 src/MultiFormatCodeConverter.hpp
-src/Ps1MipsCodeTypes.hpp
+CAETLA_0.34_CODE_TYPES.md
 ```
 
 This keeps device-specific meanings separate.
@@ -1102,7 +1151,7 @@ The project is intended to build with **Microsoft Visual C++ / MSVC** and now pr
 
 The source no longer uses `std::filesystem`. File and folder operations use Windows 7-compatible Win32 APIs, the C/C++ runtime is linked statically, and the linker subsystem is set to Windows 7 (`6.01`). The build also checks the finished executable for known Windows 8+ imports such as `CreateFile2`.
 
-Use **Visual Studio 2026 Build Tools** with the **Desktop development with C++** workload. The full Visual Studio IDE is not required.
+Use **Visual Studio 2022 Build Tools** or **Visual Studio 2019** with the **Desktop development with C++** workload. The full Visual Studio IDE is not required.
 
 Run:
 
@@ -1124,7 +1173,7 @@ build.cmd win32
 build.cmd win64
 ```
 
-The script locates a Visual Studio 2026 C++ toolchain automatically. The generated filenames remain unchanged:
+The script locates a Visual Studio 2022 or 2019 C++ toolchain automatically. The generated filenames remain unchanged:
 
 ```text
 XploderConverterGui-Win32.exe
@@ -1134,6 +1183,38 @@ XploderConverterGui-Win64.exe
 A GitHub Actions workflow is also included at `.github/workflows/build-windows.yml`. It can build both executables on GitHub without installing Visual Studio locally.
 
 </details>
+
+---
+
+<details>
+<summary><strong>🧪 Regression Tests</strong></summary>
+
+<br>
+
+The `tests` folder includes the original converter regression programs plus a dedicated Type 5/Type 6 context test:
+
+```text
+test_batch_normalization.cpp
+test_multiformat_conversion.cpp
+test_nested_type6_type5.cpp
+test_ps1_mips.cpp
+test_regressions.cpp
+test_typeaware_masswrite.cpp
+```
+
+The context test verifies that:
+
+- a Type 5 payload row that resembles a normal encrypted code remains payload data;
+- every row claimed by a Type 6 length remains in the Type 6 block;
+- the first row after the declared block is processed normally;
+- code-type annotations do not label payload rows as standalone Type `E`, `9`, `5`, or `6` codes;
+- complete six-byte final rows survive exact decrypt/encrypt round trips.
+
+All tests build as C++17 with warnings treated as errors. They were also exercised with AddressSanitizer and UndefinedBehaviorSanitizer.
+
+</details>
+
+---
 
 <details>
 <summary><strong>▶️ Basic Usage</strong></summary>
@@ -1176,6 +1257,7 @@ Some prefixes therefore have different meanings depending on the active interpre
 </details>
 
 ---
+
 <details>
 <summary><strong>🙏 Credits and Thanks</strong></summary>
 
@@ -1183,35 +1265,17 @@ Some prefixes therefore have different meanings depending on the active interpre
 
 ### misfire
 
-GitHub: [mlafeldt](https://github.com/mlafeldt)
+GitHub: https://github.com/mlafeldt
 
-Thank you for the original `xpcrypt` work and for your long-standing contributions to the PlayStation cheat-code and hacking community.
+Thank you for the original `xpcrypt` work and for long-standing contributions to the PlayStation cheat and hacking scene.
 
 ### Parasyte
 
-Thank you for your contributions to the PlayStation hacking and cheat-code community.
-
-### Connor McLaughlin (stenzek)
-
-GitHub: [stenzek/duckstation](https://github.com/stenzek/duckstation)
-
-Thank you for the continued development of DuckStation and for making its source code available as a valuable technical reference for PlayStation emulation and cheat-code research.
-
-### szalay
-
-Thus...Thank you for the extensive testing, feedback, and help refining the program into a more reliable and practical tool.
-
-### Lee4
-
-Thank you for reminding me about the little details and features I had forgotten from the old PlayStation 1 days. 😄
-
-### GameHacking.org
-
-Thank you for the many years of contributions, documentation, code archives, and technical information provided to the game-hacking community.
+Thank you for contributions to the PlayStation hacking and cheat-code community.
 
 ### Scene and Preservation Community
 
-This project builds upon the work of the many researchers, developers, testers, and preservationists who have documented, tested, preserved, and shared knowledge about PlayStation cheat devices, firmware, encryption methods, and code formats.
+This project builds on the broader work of researchers who documented, tested, preserved, and shared knowledge about PlayStation cheat devices and code formats.
 
 </details>
 
@@ -1245,6 +1309,6 @@ See the repository `LICENSE` file for the complete license text.
 
 <div align="center">
 
-**Xploder PSX Converter v1.05**
+**Xploder PSX Converter v1.06**
 
 </div>
