@@ -16,6 +16,59 @@ namespace psx_code_types
         return xploder_psx::codeFromHex(line.addressText + line.valueText, code);
     }
 
+    inline bool tryParseWordValue(std::string_view valueText, std::uint32_t& value) noexcept
+    {
+        value = 0;
+        if (valueText.size() != 4 || hasWildcard(valueText))
+            return false;
+        for (char c : valueText)
+        {
+            const int nibble = hexValue(c);
+            if (nibble < 0)
+                return false;
+            value = (value << 4U) | static_cast<std::uint32_t>(nibble);
+        }
+        return true;
+    }
+
+    inline bool tryGetXploderPublicMassWriteSize(
+        const ParsedCodeLine& line,
+        bool& isType6,
+        int& sizeField) noexcept
+    {
+        isType6 = false;
+        sizeField = 0;
+        if (line.valueText.size() != 4 || hasWildcard(line.valueText))
+            return false;
+        const char type = line.addressText.empty() ? '\0' : line.addressText[0];
+        if (type != '5' && type != '6')
+            return false;
+        std::uint32_t value = 0;
+        if (!tryParseWordValue(line.valueText, value))
+            return false;
+        isType6 = type == '6';
+        sizeField = isType6
+            ? static_cast<int>(value & 0xFFFFU)
+            : static_cast<int>(value & 0x0FFFU);
+        return true;
+    }
+
+    inline Operation makeXploderSpecific(
+        std::vector<std::string> sourceLines,
+        std::string detail)
+    {
+        return makeDeviceSpecific(std::move(sourceLines), std::move(detail), Family::XploderRaw);
+    }
+
+    inline void appendValueBytes(std::vector<std::uint8_t>& bytes, const std::string& valueText)
+    {
+        std::uint32_t value = 0;
+        if (!tryParseWordValue(valueText, value))
+            return;
+        bytes.push_back(static_cast<std::uint8_t>((value >> 8U) & 0xFFU));
+        bytes.push_back(static_cast<std::uint8_t>(value & 0xFFU));
+    }
+
     inline std::vector<Operation> parseXploderRaw(const std::string& input)
     {
         const std::vector<std::string> lines = splitLines(input);
@@ -39,7 +92,39 @@ namespace psx_code_types
                 if (parsedLineToXploderCode(line, header))
                 {
                     xploder_psx::MassWriteInfo info;
-                    if (xploder_psx::tryGetMassWriteInfoFromPublicHeader(header, info) &&
+                    const bool hasMassWriteInfo =
+                        xploder_psx::tryGetMassWriteInfoFromPublicHeader(header, info);
+                    bool rawIsType6 = false;
+                    int rawSizeField = 0;
+                    const bool hasRawSizeField =
+                        tryGetXploderPublicMassWriteSize(line, rawIsType6, rawSizeField);
+
+                    if ((hasMassWriteInfo && info.payloadByteCount == 0) ||
+                        (!hasMassWriteInfo && hasRawSizeField && rawSizeField == 0))
+                    {
+                        std::vector<std::string> zeroSourceLines{lines[i]};
+                        if (rawIsType6 && i + 2U < lines.size())
+                        {
+                            ParsedCodeLine descriptorLine;
+                            ParsedCodeLine maskLine;
+                            if (parseCodeLine(lines[i + 1U], descriptorLine) &&
+                                parseCodeLine(lines[i + 2U], maskLine))
+                            {
+                                zeroSourceLines.push_back(lines[i + 1U]);
+                                zeroSourceLines.push_back(lines[i + 2U]);
+                                i += 2U;
+                            }
+                        }
+
+                        output.push_back(makeXploderSpecific(
+                            std::move(zeroSourceLines),
+                            rawIsType6
+                                ? "Xploder Type 6 Megacode declares a zero-length executable payload; original engines run away instead of doing nothing"
+                                : "Xploder Type 5 Supercode declares a zero-length payload; original engines run away instead of doing nothing"));
+                        continue;
+                    }
+
+                    if (hasMassWriteInfo &&
                         info.payloadLineCount > 0 &&
                         i + static_cast<std::size_t>(info.payloadLineCount) < lines.size())
                     {
@@ -185,6 +270,54 @@ namespace psx_code_types
                 }
             }
 
+            // Xploder Type A is the hand-entry form of a Supercode. The
+            // staging pass copies the header value as the first two payload
+            // bytes, then consumes every following code row in the same cheat
+            // entry as six literal bytes. Because this window parser does not
+            // have an explicit cheat-entry AST, the block ends at the first
+            // non-code/text row.
+            if (type == 'A' && !hasWildcard(line.valueText))
+            {
+                Operation operation;
+                operation.sourceFamily = Family::XploderRaw;
+                operation.kind = OperationKind::XploderMassWrite;
+                operation.address = maskedPsxAddress(line.address);
+                operation.defaultOff = false;
+                operation.sourceLines = {lines[i]};
+                operation.detail = "Xploder Type A inline data block staged as a Type 5 Supercode";
+                appendValueBytes(operation.payload, line.valueText);
+
+                std::size_t consumed = 0;
+                for (std::size_t sourceIndex = i + 1U; sourceIndex < lines.size(); ++sourceIndex)
+                {
+                    ParsedCodeLine payloadLine;
+                    xploder_psx::Code row;
+                    if (!parseCodeLine(lines[sourceIndex], payloadLine) ||
+                        !parsedLineToXploderCode(payloadLine, row))
+                    {
+                        break;
+                    }
+
+                    operation.sourceLines.push_back(lines[sourceIndex]);
+                    for (std::uint8_t byte : row.b)
+                        operation.payload.push_back(byte);
+                    ++consumed;
+                }
+
+                if (consumed == 0U)
+                {
+                    output.push_back(makeXploderSpecific(
+                        {lines[i]},
+                        "Xploder Type A inline data block has no following literal payload rows in this input window"));
+                }
+                else
+                {
+                    output.push_back(std::move(operation));
+                    i += consumed;
+                }
+                continue;
+            }
+
             // Xploder Type B is a two-line 16-bit slider. In the external
             // decrypted format used by this converter the repeat count is the
             // low eight bits of the NNN field; the second nibble remains the
@@ -207,10 +340,20 @@ namespace psx_code_types
                         ? static_cast<std::int32_t>(rawValueStep)
                         : static_cast<std::int32_t>(rawValueStep) - 0x10000;
 
+                    const std::uint32_t repeatCount = (line.address >> 16) & 0xFFU;
+                    if (repeatCount == 0U)
+                    {
+                        output.push_back(makeXploderSpecific(
+                            {lines[i], lines[i + 1U]},
+                            "Xploder Type B slide has a zero repeat count and is preserved instead of expanded"));
+                        ++i;
+                        continue;
+                    }
+
                     Operation operation;
                     operation.sourceFamily = Family::XploderRaw;
                     operation.kind = OperationKind::SerialRepeater;
-                    operation.count = (line.address >> 16) & 0xFFU;
+                    operation.count = repeatCount;
                     operation.address = maskedPsxAddress(baseLine.address);
                     operation.value = wordValue(baseLine.valueText);
                     operation.widthBits = 16;
@@ -263,12 +406,48 @@ namespace psx_code_types
                 operation.kind = OperationKind::CompareNotEqual16;
                 operation.value = wordValue(line.valueText);
             }
+            else if (type == 'E')
+            {
+                operation.kind = OperationKind::Write8;
+                operation.address = maskedPsxAddress(line.address + 1U);
+                operation.value = byteValue(line.valueText);
+                operation.detail = "Xploder Type E writes the high byte at address + 1";
+            }
+            else if (type == 'F')
+            {
+                operation = makeXploderSpecific(
+                    {lines[i]},
+                    "Xploder Type F is a global anchor condition; on mismatch it aborts the enabled list for that pass");
+            }
+            else if (type == 'D')
+            {
+                operation = makeXploderSpecific(
+                    {lines[i]},
+                    "Xploder Type D is staging-promoted to a Type F global anchor only when it is the single Type D in the enabled selection");
+            }
+            else if (type == 'C')
+            {
+                operation = makeXploderSpecific(
+                    {lines[i]},
+                    "Xploder Type C has no confirmed runtime handler and is preserved as database/device-specific data");
+            }
+            else if (type == '1' || type == '2')
+            {
+                operation = makeXploderSpecific(
+                    {lines[i]},
+                    "Xploder code type has no runtime handler; Type 1 is commonly used as the inert carrier row for Type B slides");
+            }
+            else if (type == '4')
+            {
+                operation = makeXploderSpecific(
+                    {lines[i]},
+                    "Xploder Type 4 slow-motion delay is firmware-family-specific and is not a normal RAM write");
+            }
             else
             {
-                operation = makeDeviceSpecific(
+                operation = makeXploderSpecific(
                     {lines[i]},
-                    "Xploder RAW code type has no confirmed semantic mapping",
-                    Family::XploderRaw);
+                    "Xploder RAW code type has no confirmed semantic mapping");
             }
             output.push_back(std::move(operation));
         }

@@ -156,11 +156,32 @@ namespace legacy_database_import
             }
         }
 
+        inline const char* xploderNameAbbreviation(std::uint8_t byte) noexcept
+        {
+            switch (byte)
+            {
+                case 0x01U: return "Infinite";
+                case 0x02U: return "Unlimited";
+                case 0x03U: return " Lives";
+                case 0x04U: return "Player";
+                case 0x05U: return " Energy";
+                case 0x06U: return " Time";
+                case 0x07U: return "Money";
+                default: return nullptr;
+            }
+        }
+
+        inline bool isXploderNameAbbreviation(std::uint8_t byte) noexcept
+        {
+            return xploderNameAbbreviation(byte) != nullptr;
+        }
+
         inline std::string decodeName(
             const std::vector<std::uint8_t>& bytes,
             std::size_t begin,
             std::size_t end,
-            bool stripArControlBytes)
+            bool stripArControlBytes,
+            bool expandXploderAbbreviations = false)
         {
             std::string decoded;
             decoded.reserve(end > begin ? end - begin : 0U);
@@ -168,6 +189,15 @@ namespace legacy_database_import
             for (std::size_t i = begin; i < end; ++i)
             {
                 const std::uint8_t byte = bytes[i];
+                if (expandXploderAbbreviations)
+                {
+                    if (const char* abbreviation = xploderNameAbbreviation(byte))
+                    {
+                        decoded += abbreviation;
+                        started = true;
+                        continue;
+                    }
+                }
                 if (stripArControlBytes && byte >= 0xF9U)
                 {
                     // AR/GS v1 databases use F9-FF as display/control glyphs.
@@ -227,6 +257,8 @@ namespace legacy_database_import
             for (std::size_t i = begin; i < end; ++i)
             {
                 const std::uint8_t byte = bytes[i];
+                if (isXploderNameAbbreviation(byte))
+                    continue;
                 if (byte < 0x20U || byte == 0x7FU)
                     return false;
             }
@@ -317,7 +349,7 @@ namespace legacy_database_import
                     return false;
                 }
 
-                const std::string gameName = decodeName(rom, position, gameNameEnd, false);
+                const std::string gameName = decodeName(rom, position, gameNameEnd, false, true);
                 position = gameNameEnd + 1U;
                 if (position >= rom.size())
                     return false;
@@ -338,7 +370,7 @@ namespace legacy_database_import
                         return false;
                     }
 
-                    std::string cheatName = decodeName(rom, position, cheatNameEnd, false);
+                    std::string cheatName = decodeName(rom, position, cheatNameEnd, false, true);
                     if (cheatName.empty())
                         cheatName = "Unnamed Code";
                     position = cheatNameEnd + 1U;

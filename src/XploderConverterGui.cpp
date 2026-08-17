@@ -50,8 +50,8 @@ namespace
     constexpr wchar_t WindowClassName[] = L"XploderPsxConverterGuiWindow";
     constexpr wchar_t SplitterClassName[] = L"XploderPsxConverterSplitter";
     constexpr wchar_t AppTitle[] = L"Xploder PSX Converter";
-    constexpr wchar_t AppVersion[] = L"v1.05";
-    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.05";
+    constexpr wchar_t AppVersion[] = L"v1.06";
+    constexpr wchar_t WindowTitle[] = L"Xploder PSX Converter v1.06";
 
     enum ControlId : int
     {
